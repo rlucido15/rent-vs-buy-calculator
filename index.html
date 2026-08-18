@@ -1,2331 +1,386 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Rent vs. buy calculator — Moxie Mortgage</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<style>
-/* ============================================================
-   BRAND HEX — replace these two lines with Moxie's exact values
-   Line ~15 --moxie-blue  ·  Line ~16 --coral
-   ============================================================ */
-:root{
-  /* ============================================================
-     BRAND COLORS
-     primary   #28B5CF  (cyan)   — structural / rent side
-     secondary #F46744  (coral)  — buy side / key accent
-     accent    #0D1424  (navy)   — text, ink, dark buttons
-     ============================================================ */
-  --ink:        #F4F6FA;   /* page background — light grey so white cards lift */
-  --card:       #FFFFFF;   /* white cards */
-  --surface:    #F5F7FA;   /* input wells */
-  --surface-2:  #EAF7FA;   /* raised: active step, tooltip, table header (faint cyan tint) */
-  --hairline:   #E2E8F1;   /* 1px borders */
-  --moxie-blue: #1E93AC;   /* PRIMARY (darkened from #28B5CF for text/line contrast on white) */
-  --brand-cyan: #28B5CF;   /* raw brand primary for fills */
-  --coral:      #F46744;   /* SECONDARY */
-  --text:       #0D1424;   /* ACCENT navy */
-  --text-muted: #5A6472;
-  --positive:   #1B9E77;
-  --on-accent:  #FFFFFF;   /* text/edges sitting on cyan or coral */
+/**
+ * Lofty lead intake — a SHARED Google Apps Script Web App.
+ * ===========================================================================
+ * ONE endpoint that every Claude-built CTA / landing page / form can POST leads
+ * to. It holds your Lofty API token server-side, then for each incoming lead it:
+ *
+ *     1. SEARCHES Lofty for an existing lead (by email, then phone).
+ *     2. If found  -> UPDATES that lead (adds the CTA tag, fills blanks, pins a
+ *                     fresh note with the new submission).
+ *        If not    -> CREATES a new lead.
+ *
+ * It is CTA-agnostic. Any form can post to it. Whatever standard contact fields
+ * it recognizes (name, email, phone, address...) are mapped to the right Lofty
+ * fields; every OTHER field on the form is preserved (in a readable pinned note,
+ * and — when you configure them — as Lofty custom fields). The lead's tag is
+ * ALWAYS taken from the payload and always stored as "CTA: <Title>".
+ *
+ * ========================= ONE-TIME SETUP (do this once) =========================
+ * 1. script.google.com -> New project. Paste this whole file in. Save.
+ * 2. Project Settings (gear) -> Script properties -> Add property:
+ *        LOFTY_TOKEN    = your Lofty API key  (Settings > Integrations > API in Lofty)
+ *    Optionally also add:
+ *        SHARED_SECRET  = any long random string (a light spam guard). If you set
+ *                         this, every CTA must send the same value as `secret`.
+ *                         Leave it unset to disable the check.
+ * 3. Deploy -> New deployment -> "Web app".
+ *        Execute as: Me
+ *        Who has access: Anyone        <-- REQUIRED, or browsers get "Failed to fetch"
+ *    Copy the /exec URL. That URL goes in every CTA's LEAD_ENDPOINT.
+ * 4. Run testPing() once from the editor to authorize outbound fetch (Google will
+ *    prompt the first time), and to push a real test lead into Lofty.
+ *
+ * ========================= ADDING A NEW CTA LATER =========================
+ * Nothing to change here. Point the new page at the same /exec URL and POST a
+ * payload like:
+ *
+ *     {
+ *       "name": "Jane Smith",              // or firstName / lastName
+ *       "email": "jane@email.com",
+ *       "phone": "5551234567",
+ *       "cta": "Rent vs. Buy Calculator",  // becomes tag "CTA: Rent vs. Buy Calculator"
+ *       "source": "MoxieMortgage.com",
+ *       "consent": true,                   // marks the lead contactable
+ *       "secret": "<SHARED_SECRET if you set one>",
+ *       "fields": {                        // OPTIONAL: any extra form fields, freeform
+ *         "Home Price": "$400,000",
+ *         "Down Payment": "10%",
+ *         "Credit Score": 740
+ *       }
+ *     }
+ *
+ * `cta` (or `tag`) drives the tag. `fields` (or `inputs` / `results`) is any
+ * key/value data your form collected — it is preserved on the lead automatically.
+ *
+ * SECURITY: the Lofty token + shared secret live only in Script Properties, never
+ * in any page's client code, so the CTAs are safe to embed publicly.
+ */
 
-  --sp-1:8px; --sp-2:16px; --sp-3:24px; --sp-4:32px; --sp-5:40px; --sp-6:48px;
-  --sec-gap:40px;   /* consistent vertical rhythm between result sections */
-  --radius:10px;         /* Rocket-style rounded geometry */
-  --radius-lg:16px;      /* large cards */
-  --radius-pill:999px;   /* buttons */
-  --shadow:0 2px 8px rgba(13,20,36,.06), 0 1px 2px rgba(13,20,36,.04);
-  --shadow-lg:0 8px 28px rgba(14,23,35,.10);
-  --maxw:1120px;
-  --disp:"Archivo",system-ui,sans-serif;
-  --body:"Inter",system-ui,sans-serif;
-}
+var LOFTY_BASE = 'https://api.lofty.com/v1.0/leads';
 
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-html{-webkit-text-size-adjust:100%}
-body{
-  background:var(--ink);
-  color:var(--text);
-  font-family:var(--body);
-  font-size:15px;
-  line-height:1.5;
-  overflow-x:hidden;
-  -webkit-font-smoothing:antialiased;
-}
-.tab{font-variant-numeric:tabular-nums}
-button{font-family:inherit;cursor:pointer;color:inherit;background:none;border:none}
-input{font-family:inherit}
-a{color:var(--coral);text-decoration:none}
-a:hover{text-decoration:underline}
-:focus-visible{outline:2px solid var(--moxie-blue);outline-offset:2px;border-radius:3px}
+/* =============================== HTTP entry =============================== */
 
-/* ---------- shell ---------- */
-.shell{
-  width:100%;
-  max-width:var(--maxw);
-  margin:0 auto;
-  min-height:1100px;
-  padding:var(--sp-4) var(--sp-4) var(--sp-6);
-  position:relative;
-}
-@media(max-width:640px){
-  .shell{min-height:1500px;padding:var(--sp-3) var(--sp-2) var(--sp-5)}
-}
+function doPost(e) {
+  try {
+    // Accept the payload as a "payload" form field (hidden-iframe method, the
+    // reliable way to reach Apps Script) OR as a raw JSON body (fetch).
+    var raw = (e && e.parameter && e.parameter.payload)
+      ? e.parameter.payload
+      : ((e && e.postData && e.postData.contents) || '{}');
+    var body = JSON.parse(raw);
 
-/* ---------- header ---------- */
-.head{
-  display:flex;align-items:center;justify-content:flex-start;
-  gap:var(--sp-2);flex-wrap:wrap;
-  padding-bottom:var(--sp-3);
-  border-bottom:1px solid var(--hairline);
-}
+    // Optional shared-secret gate.
+    var expected = PropertiesService.getScriptProperties().getProperty('SHARED_SECRET');
+    if (expected && String(body.secret || '') !== expected) {
+      return json({ ok: false, error: 'unauthorized' });
+    }
 
-.progress{display:flex;align-items:center;gap:var(--sp-1);flex-wrap:wrap}
-.pstep{
-  display:flex;align-items:center;gap:9px;
-  font-size:13px;color:var(--text-muted);font-weight:500;
-  padding:6px 12px;border-radius:999px;
-  letter-spacing:.01em;
-}
-.pstep .num{
-  width:22px;height:22px;border-radius:50%;
-  border:1.5px solid var(--hairline);
-  display:grid;place-items:center;font-size:12px;font-weight:700;
-  color:var(--text-muted);flex:none;
-}
-.pstep[data-state="active"]{background:var(--surface-2);color:var(--text);font-weight:700}
-.pstep[data-state="active"] .num{
-  background:var(--coral);border-color:var(--coral);color:#fff;
-  box-shadow:0 2px 6px rgba(244,103,68,.4);
-}
-.pstep[data-state="done"]{color:var(--text);font-weight:600}
-.pstep[data-state="done"] .num{background:var(--moxie-blue);border-color:var(--moxie-blue);color:#fff}
-.pstep[data-clickable="1"]{cursor:pointer}
-.pstep[data-clickable="1"]:hover{color:var(--text)}
-.psep{width:14px;height:1px;background:var(--hairline)}
-@media(max-width:760px){
-  .pstep .lbl{display:none}
-  .pstep[data-state="active"] .lbl{display:inline}
-}
+    var token = PropertiesService.getScriptProperties().getProperty('LOFTY_TOKEN');
+    if (!token) return json({ ok: false, error: 'server not configured (LOFTY_TOKEN missing)' });
 
-/* ---------- layout: form + rail ---------- */
-.work{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-4);margin-top:var(--sp-4);align-items:start}
-.work:not(.is-step1){align-items:stretch}
-@media(max-width:900px){.work{grid-template-columns:1fr;gap:var(--sp-3)}}
+    var email = String(body.email || '').trim();
+    var phone = toE164(String(body.phone || ''));
+    var name  = splitName(String(body.firstName || body.name || '') +
+                          (body.lastName ? ' ' + body.lastName : ''));
 
-.stepwrap{position:relative;overflow:hidden;background:var(--card);border:1px solid var(--hairline);border-radius:var(--radius-lg);box-shadow:var(--shadow);padding:var(--sp-4);container-type:inline-size;container-name:stepwrap}
-@media(max-width:640px){.stepwrap{padding:var(--sp-3)}}
-.step{}
-.step h2{
-  font-family:var(--disp);font-weight:600;font-size:30px;letter-spacing:-.02em;
-  margin-bottom:6px;line-height:1.1;
-}
-.step .sub{color:var(--text-muted);font-size:13px;margin-bottom:var(--sp-3)}
+    if (!name.firstName && !email && !phone) {
+      return json({ ok: false, error: 'a name, email, or phone is required' });
+    }
 
-.slide-in-r{animation:slideR .28s cubic-bezier(.2,.7,.3,1)}
-.slide-in-l{animation:slideL .28s cubic-bezier(.2,.7,.3,1)}
-@keyframes slideR{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:none}}
-@keyframes slideL{from{opacity:0;transform:translateX(-24px)}to{opacity:1;transform:none}}
-@media(prefers-reduced-motion:reduce){
-  .slide-in-r,.slide-in-l{animation:none}
-}
+    // 1) Search Lofty for an existing lead (email first, then phone).
+    var existingId = findExistingLeadId(token, email, phone);
 
-/* ---------- fields (Rocket inset-label cards) ---------- */
-.grid{display:grid;grid-template-columns:1fr;gap:var(--sp-3) var(--sp-3)}
-@container stepwrap (min-width:520px){.grid{grid-template-columns:1fr 1fr}}
-/* fallback for browsers without container queries: use viewport */
-@supports not (container-type:inline-size){
-  .grid{grid-template-columns:1fr 1fr}
-  @media(max-width:560px){.grid{grid-template-columns:1fr}}
-}
-.field{}
-.field.full{grid-column:1/-1}
-
-/* ---------- bento: compact packed layout for step 1 ---------- */
-.grid.bento{gap:12px}
-@container stepwrap (min-width:440px){
-  .grid.bento{grid-template-columns:1fr 1fr}
-}
-@supports not (container-type:inline-size){
-  .grid.bento{grid-template-columns:1fr 1fr}
-}
-.grid.bento .field{display:flex;flex-direction:column;min-width:0}
-.grid.bento .inwell{height:72px;min-height:72px;padding:10px 14px;min-width:0;align-content:center}
-.grid.bento .inwell input,.grid.bento .inwell .pre{font-size:17px}
-.grid.bento .helper{font-size:11px;margin-top:5px;line-height:1.3}
-/* span helpers: keep price full-width as the anchor, others share rows */
-.grid.bento .field.span2{grid-column:1/-1}
-/* the label sits inside the field card, small and muted, above the value */
-.field > label:not(.toggle){
-  display:block;font-size:12px;color:var(--text-muted);
-  font-weight:500;margin-bottom:2px;
-}
-.field > label .req{color:var(--coral);margin-left:1px}
-/* inwell IS the white field card now */
-.inwell{
-  display:flex;align-items:center;
-  background:var(--card);border:1px solid var(--hairline);
-  border-radius:var(--radius);min-height:64px;padding:12px 16px;
-  transition:border-color .12s,box-shadow .12s;
-  flex-wrap:wrap;
-}
-.inwell:focus-within{border-color:var(--moxie-blue);box-shadow:0 0 0 3px rgba(40,181,207,.18)}
-.inwell.invalid{border-color:var(--coral);box-shadow:0 0 0 3px rgba(244,103,68,.14)}
-/* label lives inside the well, spanning full width above the value */
-.inwell > .flab{
-  flex:1 0 100%;font-size:12px;color:var(--text-muted);font-weight:500;
-  margin-bottom:3px;display:flex;align-items:center;gap:5px;
-}
-.inwell > .flab .req{color:var(--coral)}
-.inwell .pre{color:var(--text);font-size:18px;margin-right:3px;font-weight:600}
-.inwell .suf{color:var(--text-muted);font-size:14px;margin-left:4px;white-space:nowrap;flex:none}
-#dpWell{align-items:center}
-#dpWell input{flex:0 1 auto;min-width:32px;width:auto;max-width:70px}
-#dpWell .suf{margin-right:0;order:2}
-#dpWell .dpToggle{order:3}
-.grid.bento #dpWell{padding-right:10px}
-.grid.bento #dpWell .dpToggle{height:30px}
-.grid.bento #dpWell .dpToggle button{padding:0 11px;font-size:13px}
-.inwell input{
-  width:auto;flex:1 1 60px;border:none;background:none;color:var(--text);
-  font-size:18px;font-weight:600;font-variant-numeric:tabular-nums;
-  min-width:40px;
-}
-.inwell input:focus{outline:none}
-.helper{font-size:12px;color:var(--text-muted);margin-top:8px;line-height:1.4}
-
-/* slider paired */
-.slider-row{display:flex;align-items:center;gap:12px}
-.slider-row .inwell{width:96px;flex:none;height:40px}
-input[type=range]{
-  -webkit-appearance:none;appearance:none;flex:1;height:4px;border-radius:2px;
-  background:var(--hairline);outline-offset:6px;
-}
-input[type=range]::-webkit-slider-thumb{
-  -webkit-appearance:none;width:18px;height:18px;border-radius:50%;
-  background:var(--coral);border:3px solid var(--ink);cursor:pointer;
-  box-shadow:0 0 0 1px var(--coral);
-}
-input[type=range]::-moz-range-thumb{
-  width:15px;height:15px;border-radius:50%;background:var(--coral);
-  border:3px solid var(--ink);cursor:pointer;
-}
-
-/* segmented + toggle */
-.seg{display:inline-flex;background:var(--card);border:1px solid var(--hairline);border-radius:var(--radius);overflow:hidden;height:48px}
-.seg button{padding:0 16px;font-size:14px;font-weight:600;color:var(--text-muted);border-right:1px solid var(--hairline)}
-.seg button:last-child{border-right:none}
-.seg button[aria-pressed="true"]{background:var(--moxie-blue);color:var(--on-accent)}
-.seg.sm{height:38px}
-.seg.sm button{padding:0 14px;font-size:13px}
-/* down-payment $/% toggle sitting inside the field, pushed right */
-.dpToggle{margin-left:auto;height:34px;background:var(--surface-2);border-color:var(--surface-2);border-radius:var(--radius-pill);overflow:hidden;flex:none}
-.dpToggle button{padding:0 14px;font-size:14px;font-weight:600;border-right:none;color:var(--text-muted);border-radius:var(--radius-pill)}
-.dpToggle button[aria-pressed="true"]{background:var(--text);color:var(--on-accent)}
-
-.toggle{display:flex;align-items:center;gap:10px;font-size:14px;color:var(--text);cursor:pointer}
-.toggle .track{width:44px;height:26px;border-radius:var(--radius-pill);background:var(--surface-2);border:1px solid var(--hairline);position:relative;transition:background .12s;flex:none}
-.toggle .knob{position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:var(--shadow);transition:transform .12s,background .12s}
-.toggle input{position:absolute;opacity:0;width:0;height:0}
-.toggle input:checked + .track{background:var(--moxie-blue)}
-.toggle input:checked + .track .knob{transform:translateX(18px);background:#fff}
-
-.dpToggle{margin-bottom:7px}
-
-.tip{position:relative;display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;border:1px solid var(--hairline);color:var(--text-muted);font-size:10px;font-weight:700;margin-left:6px;cursor:help;vertical-align:middle}
-.tip:hover .tipbox,.tip:focus .tipbox{opacity:1;visibility:visible}
-.tipbox{
-  position:absolute;bottom:150%;left:50%;transform:translateX(-50%);
-  width:210px;background:var(--surface-2);border:1px solid var(--hairline);
-  border-radius:var(--radius);padding:9px 11px;font-size:12px;color:var(--text);
-  font-weight:400;line-height:1.45;text-transform:none;letter-spacing:0;z-index:20;
-  opacity:0;visibility:hidden;transition:opacity .12s;box-shadow:0 4px 16px rgba(14,23,35,.14);
-}
-/* edge-aligned variants so tooltips near a container edge don't overflow */
-.tip.tip-left .tipbox{left:0;transform:none}
-.tip.tip-right .tipbox{left:auto;right:0;transform:none}
-@media(max-width:420px){
-  .tipbox{width:min(210px, 78vw)}
-}
-/* on stacked mobile figure rows the "?" sits toward the right, so anchor tooltips
-   to the right edge to keep them on-screen regardless of desktop tip-left/right */
-@media(max-width:640px){
-  .figrow .tip .tipbox{left:auto;right:0;transform:none}
-}
-
-/* ---------- nav ---------- */
-.nav{display:flex;justify-content:space-between;align-items:center;margin-top:var(--sp-4);gap:var(--sp-2)}
-.btn{
-  border-radius:var(--radius-pill);font-weight:600;font-size:15px;
-  padding:13px 26px;border:1px solid var(--hairline);transition:.12s;
-}
-.btn.ghost{color:var(--text-muted)}
-.btn.ghost:hover{color:var(--text);border-color:var(--text-muted)}
-.btn.primary{background:var(--coral);color:var(--on-accent);border-color:var(--coral)}
-.btn.primary:hover{filter:brightness(1.06)}
-.btn.blue{background:var(--moxie-blue);color:#fff;border-color:var(--moxie-blue)}
-.btn.ink{background:var(--text);color:var(--on-accent);border-color:var(--text)}
-.btn.ink:hover{filter:brightness(1.6)}
-.btn.blue:hover{filter:brightness(1.06)}
-
-/* ---------- step 2 financial profile (right column card) ---------- */
-.finprofile{
-  background:var(--card);border:1px solid var(--hairline);border-radius:var(--radius-lg);
-  padding:var(--sp-4);position:sticky;top:var(--sp-2);box-shadow:var(--shadow);
-  container-type:inline-size;container-name:stepwrap;
-}
-.finprofile h2{
-  font-family:var(--disp);font-weight:600;font-size:30px;letter-spacing:-.02em;
-  margin-bottom:6px;line-height:1.1;
-}
-.finprofile .sub{color:var(--text-muted);font-size:13px;margin-bottom:var(--sp-3)}
-@media(max-width:640px){.finprofile{padding:var(--sp-3)}}
-
-/* ---------- step 1 promo (static, dark) ---------- */
-.promo{
-  background:var(--text);           /* accent navy */
-  color:var(--on-accent);
-  border-radius:var(--radius-lg);
-  padding:var(--sp-4);
-  position:sticky;top:var(--sp-2);
-  box-shadow:var(--shadow);
-}
-.promo-title{
-  font-family:var(--disp);font-weight:700;font-size:26px;line-height:1.12;
-  letter-spacing:-.02em;color:#fff;margin-bottom:14px;
-}
-.promo-sub{font-size:15px;line-height:1.5;color:rgba(255,255,255,.72);margin-bottom:var(--sp-3)}
-.promo-list{list-style:none;display:flex;flex-direction:column;gap:12px}
-.promo-list li{
-  position:relative;padding-left:26px;font-size:14px;color:rgba(255,255,255,.9);line-height:1.4;
-}
-.promo-list li::before{
-  content:"";position:absolute;left:0;top:3px;width:16px;height:16px;border-radius:50%;
-  background:var(--brand-cyan);
-}
-.promo-list li::after{
-  content:"";position:absolute;left:5px;top:8px;width:6px;height:3px;
-  border-left:2px solid var(--text);border-bottom:2px solid var(--text);
-  transform:rotate(-45deg);
-}
-
-/* mobile sticky bar */
-.mbar{
-  display:none;position:sticky;bottom:0;z-index:15;
-  background:var(--surface-2);border-top:1px solid var(--hairline);
-  padding:10px var(--sp-2);
-  margin:var(--sp-3) calc(-1 * var(--sp-2)) 0;
-}
-.mbar .row{display:flex;justify-content:space-around;gap:8px}
-.mbar .c{text-align:center;flex:1}
-.mbar .l{font-size:9px;letter-spacing:.04em;text-transform:uppercase;color:var(--text-muted);font-weight:600}
-.mbar .v{font-family:var(--disp);font-weight:700;font-size:16px;font-variant-numeric:tabular-nums;margin-top:2px}
-.mbar .buy{color:var(--coral)}.mbar .rent{color:var(--moxie-blue)}
-/* sidebar swap: promo on step 1, financial profile column on step 2 */
-.promo{display:none}
-.work.is-step1 .fincol{display:none}
-.work.is-step1 .promo{display:block}
-
-/* right column on step 2: financial profile card + action box, bottom-aligned to the form */
-.fincol{display:flex;flex-direction:column;gap:var(--sp-3);position:sticky;top:var(--sp-2)}
-.fincol .finprofile{position:static;top:auto}
-.actionbox{
-  background:var(--card);border:1px solid var(--hairline);border-radius:var(--radius-lg);
-  box-shadow:var(--shadow);padding:var(--sp-3) var(--sp-4);margin-top:auto;
-  display:flex;justify-content:space-between;align-items:center;gap:var(--sp-3);
-}
-.actionbox .btn{min-width:170px;text-align:center;flex:none}
-.actioncopy{min-width:0}
-.ac-title{font-family:var(--disp);font-weight:700;font-size:16px;letter-spacing:-.01em;color:var(--text);line-height:1.2}
-.ac-sub{font-size:12px;color:var(--text-muted);margin-top:4px;line-height:1.4}
-
-@media(max-width:900px){
-  /* fincol holds real inputs, so it stays visible on step 2 and stacks below the form */
-  .fincol{position:static}
-  .actionbox{margin-top:0;flex-direction:column;align-items:stretch;text-align:center;gap:14px}
-  .actionbox .btn{width:100%}
-  .work.is-step1 .promo{display:none}   /* on mobile, the headline sells the tool; rely on the sticky bar */
-  .mbar{display:block}
-}
-
-/* ============================================================
-   RESULTS
-   ============================================================ */
-.results{margin-top:var(--sp-3)}
-.results.hidden,.work.hidden{display:none}
-
-.inputstrip{
-  display:flex;flex-wrap:wrap;gap:6px 8px;
-  padding-bottom:var(--sp-3);margin-bottom:var(--sp-3);
-  border-bottom:1px solid var(--hairline);align-items:center;
-}
-.inputstrip .chip{
-  font-size:12px;color:var(--text-muted);background:var(--surface);
-  border:1px solid var(--hairline);border-radius:var(--radius);
-  padding:5px 9px;cursor:pointer;transition:.12s;
-}
-.inputstrip .chip:hover{border-color:var(--moxie-blue);color:var(--text)}
-.inputstrip .chip b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
-.inputstrip .edit{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted);font-weight:600;margin-right:4px}
-
-/* results time-horizon slider */
-.horizon{
-  background:var(--text);
-  background-image:radial-gradient(120% 140% at 0% 0%, rgba(40,181,207,.20) 0%, rgba(40,181,207,0) 45%),
-                   radial-gradient(120% 140% at 100% 100%, rgba(244,103,68,.22) 0%, rgba(244,103,68,0) 45%);
-  border:none;border-radius:var(--radius-lg);
-  box-shadow:0 12px 32px rgba(13,20,36,.18);padding:16px var(--sp-4);margin-bottom:var(--sp-3);
-}
-.horizon-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
-.horizon-label{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--brand-cyan);font-weight:700}
-.horizon-val{font-size:16px;color:rgba(255,255,255,.7);font-weight:500}
-.horizon-val b{font-family:var(--disp);font-size:32px;font-weight:700;color:var(--coral);font-variant-numeric:tabular-nums;margin-right:4px;letter-spacing:-.02em;line-height:1}
-
-/* prominent, obviously-draggable slider */
-.horizon-slider{position:relative;padding:2px 0}
-.horizon input[type=range]{
-  width:100%;margin:0;height:8px;border-radius:5px;cursor:grab;
-  background:linear-gradient(var(--brand-cyan),var(--brand-cyan)) no-repeat;
-  background-size:var(--fill,100%) 100%;
-  background-color:rgba(255,255,255,.14);
-}
-.horizon input[type=range]:active{cursor:grabbing}
-.horizon input[type=range]::-webkit-slider-thumb{
-  -webkit-appearance:none;width:28px;height:28px;border-radius:50%;
-  background:var(--coral);border:4px solid #fff;cursor:grab;
-  box-shadow:0 2px 8px rgba(244,103,68,.5),0 0 0 1px rgba(13,20,36,.2);
-}
-.horizon input[type=range]:active::-webkit-slider-thumb{cursor:grabbing}
-.horizon input[type=range]::-moz-range-thumb{
-  width:24px;height:24px;border-radius:50%;background:var(--coral);
-  border:4px solid #fff;cursor:grab;box-shadow:0 2px 8px rgba(244,103,68,.5);
-}
-.horizon-ticks{display:flex;justify-content:space-between;margin-top:8px}
-.horizon-ticks span{font-size:11px;color:rgba(255,255,255,.55);font-variant-numeric:tabular-nums}
-.horizon-help{font-size:12px;color:rgba(255,255,255,.7);margin-top:12px;font-weight:500}
-
-/* calculating overlay */
-.calc-overlay{
-  display:none;position:absolute;inset:0;z-index:50;
-  background:rgba(244,246,250,.86);backdrop-filter:blur(3px);
-  align-items:flex-start;justify-content:center;padding-top:120px;
-}
-.calc-overlay.show{display:flex}
-.calc-card{
-  background:var(--card);border:1px solid var(--hairline);border-radius:var(--radius-lg);
-  box-shadow:var(--shadow-lg);padding:var(--sp-5) var(--sp-5) var(--sp-4);text-align:center;min-width:300px;
-}
-.calc-ring{display:flex;gap:8px;justify-content:center;margin-bottom:20px}
-.calc-ring span{
-  width:12px;height:12px;border-radius:50%;background:var(--brand-cyan);
-  animation:calcBounce 1s ease-in-out infinite;
-}
-.calc-ring span:nth-child(2){background:var(--coral);animation-delay:.15s}
-.calc-ring span:nth-child(3){animation-delay:.3s}
-@keyframes calcBounce{0%,80%,100%{transform:translateY(0);opacity:.5}40%{transform:translateY(-10px);opacity:1}}
-.calc-title{font-family:var(--disp);font-weight:700;font-size:20px;letter-spacing:-.01em;margin-bottom:16px}
-.calc-steps{display:flex;flex-direction:column;gap:8px}
-.calc-steps span{
-  font-size:13px;color:var(--text-muted);opacity:0;
-  animation:calcStep .6s ease forwards;
-}
-.calc-steps span:nth-child(1){animation-delay:.1s}
-.calc-steps span:nth-child(2){animation-delay:.7s}
-.calc-steps span:nth-child(3){animation-delay:1.3s}
-@keyframes calcStep{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
-@media(prefers-reduced-motion:reduce){
-  .calc-ring span,.calc-steps span{animation:none;opacity:1}
-}
-
-/* lead capture modal */
-.modal-overlay{
-  display:none;position:fixed;inset:0;z-index:120;
-  background:rgba(13,20,36,.55);backdrop-filter:blur(3px);
-  align-items:center;justify-content:center;padding:20px;
-}
-.modal-overlay.show{display:flex}
-.modal{
-  position:relative;background:var(--card);border-radius:var(--radius-lg);
-  box-shadow:var(--shadow-lg);width:100%;max-width:420px;
-  padding:var(--sp-5);max-height:calc(100vh - 40px);overflow-y:auto;
-}
-.modal-close{
-  position:absolute;top:12px;right:14px;background:none;border:none;
-  font-size:26px;line-height:1;color:var(--text-muted);cursor:pointer;padding:4px;
-}
-.modal-close:hover{color:var(--text)}
-.modal h3{font-family:var(--disp);font-weight:700;font-size:22px;letter-spacing:-.02em;margin-bottom:6px}
-.modal-sub{font-size:13px;color:var(--text-muted);line-height:1.5;margin-bottom:var(--sp-3)}
-.modal-field{margin-bottom:14px}
-.modal-field label{display:block;font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:6px}
-.modal-field input{
-  width:100%;padding:12px 14px;border:1px solid var(--hairline);border-radius:var(--radius);
-  font-size:15px;font-family:var(--body);color:var(--text);background:var(--surface);
-}
-.modal-field input:focus{outline:none;border-color:var(--moxie-blue);box-shadow:0 0 0 3px rgba(40,181,207,.18);background:var(--card)}
-.modal-field input.invalid{border-color:var(--coral);box-shadow:0 0 0 3px rgba(244,103,68,.14)}
-.modal-err{color:var(--coral);font-size:12.5px;margin:2px 0 12px;min-height:0;display:none}
-.modal-err.show{display:block}
-.modal-submit{width:100%;justify-content:center;margin-top:4px}
-.modal-submit[disabled]{opacity:.6;cursor:default}
-.modal-fine{font-size:11px;color:var(--text-muted);line-height:1.5;margin-top:12px;text-align:center}
-.modal-success{text-align:center;padding:10px 0}
-.modal-check{
-  width:56px;height:56px;border-radius:50%;background:rgba(27,158,119,.12);color:var(--positive);
-  display:inline-flex;align-items:center;justify-content:center;font-size:28px;font-weight:700;margin-bottom:16px;
-}
-.modal-success p{font-size:13.5px;color:var(--text-muted);line-height:1.5;margin:6px 0 18px}
-.modal-success .btn{min-width:120px}
-
-.verdict{margin-bottom:var(--sp-3)}
-.verdict .big{
-  font-family:var(--disp);font-weight:700;font-size:clamp(26px,5vw,40px);
-  letter-spacing:-.025em;line-height:1.08;
-}
-.verdict .big .yr{color:var(--coral)}
-.verdict .big.rent .yr{color:var(--moxie-blue)}
-.verdict .ctx{color:var(--text-muted);font-size:15px;margin-top:10px}
-
-.figrow{
-  display:grid;grid-template-columns:repeat(4,1fr);
-  background:var(--card);border:1px solid var(--hairline);border-radius:var(--radius-lg);
-  margin-bottom:var(--sp-3);box-shadow:var(--shadow);overflow:visible;
-}
-.figrow.figrow-3{grid-template-columns:repeat(3,1fr)}
-.fig{padding:var(--sp-3);border-right:1px solid var(--hairline)}
-.fig:last-child{border-right:none}
-.fig .l{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted);font-weight:600;line-height:1.3}
-.fig .v{font-family:var(--disp);font-weight:700;font-size:clamp(20px,2.4vw,28px);font-variant-numeric:tabular-nums;margin-top:8px;letter-spacing:-.01em;line-height:1}
-@media(max-width:720px){.figrow{grid-template-columns:1fr 1fr}.fig:nth-child(2){border-right:none}.fig:nth-child(1),.fig:nth-child(2){border-bottom:1px solid var(--hairline)}}
-@media(max-width:720px){.figrow.figrow-3{grid-template-columns:1fr}.figrow-3 .fig{border-right:none;border-bottom:1px solid var(--hairline)}.figrow-3 .fig:last-child{border-bottom:none}}
-
-/* results sections — each is a clearly separated unit */
-.sec{
-  margin-bottom:0;
-  padding:var(--sp-5) 0;
-  border-top:1px solid var(--hairline);
-}
-.sec:first-of-type{border-top:none}
-/* alternating tinted "wells" so consecutive sections don't blur together.
-   The bold dark treatment stays reserved for the closing CTA. */
-.sec.sec-tint{
-  border-top:none;
-  background:var(--surface);
-  border:1px solid var(--hairline);
-  border-radius:var(--radius-lg);
-  padding:var(--sp-5) var(--sp-5);
-  margin:var(--sp-3) 0;
-}
-@media(max-width:640px){
-  .sec.sec-tint{padding:var(--sp-4);margin-left:calc(-1 * var(--sp-2));margin-right:calc(-1 * var(--sp-2))}
-}
-/* a plain section that follows a tinted one shouldn't draw its own divider */
-.sec.sec-tint + .sec{border-top:none}
-/* assumptions disclosure: sits after the CTA with a clean, consistent gap */
-.sec.sec-assume{border-top:none;padding:0;margin-top:var(--sp-3)}
-
-/* dark-themed section box, matching the CTA panel — for the closing summary */
-.sec.sec-dark{
-  background:var(--text);
-  background-image:radial-gradient(120% 140% at 0% 0%, rgba(40,181,207,.20) 0%, rgba(40,181,207,0) 45%),
-                   radial-gradient(120% 140% at 100% 100%, rgba(244,103,68,.22) 0%, rgba(244,103,68,0) 45%);
-  border:none;box-shadow:0 12px 32px rgba(13,20,36,.18);
-}
-.sec.sec-dark > .eyebrow{color:rgba(255,255,255,.65)}
-.sec.sec-dark > .eyebrow .step-n{background:rgba(40,181,207,.22);color:var(--brand-cyan)}
-.sec.sec-dark > h3{color:#fff}
-.sec.sec-dark .sum-card{
-  background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);box-shadow:none;
-}
-.sec.sec-dark .sum-title{color:#fff}
-.sec.sec-dark .sum-text p{color:rgba(255,255,255,.72)}
-.sec.sec-dark .sum-text b{color:#fff}
-.sec.sec-dark .sum-icon.blue{background:rgba(40,181,207,.22);color:var(--brand-cyan)}
-.sec.sec-dark .sum-icon.green{background:rgba(27,158,119,.24);color:#5fd0a8}
-.sec.sec-dark .sum-icon.coral{background:rgba(244,103,68,.22);color:#ff8a6b}
-.sec > .eyebrow{
-  display:flex;align-items:center;gap:9px;margin-bottom:10px;
-  font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--text-muted);font-weight:700;
-}
-.sec > .eyebrow .step-n{
-  width:22px;height:22px;border-radius:50%;flex:none;
-  background:var(--surface-2);color:var(--moxie-blue);
-  display:inline-flex;align-items:center;justify-content:center;
-  font-size:12px;font-weight:700;letter-spacing:0;
-}
-.sec > h3{font-family:var(--disp);font-weight:700;font-size:22px;letter-spacing:-.015em;margin-bottom:5px;line-height:1.15}
-.sec > .lead{color:var(--text-muted);font-size:13.5px;line-height:1.5;margin-bottom:var(--sp-3)}
-
-/* cost breakdown (Rocket-style) */
-.breakdown{background:var(--card);border:1px solid var(--hairline);border-radius:var(--radius-lg);box-shadow:var(--shadow);padding:var(--sp-3)}
-.bdtabs{margin-bottom:var(--sp-3)}
-.bdrows{display:grid;grid-template-columns:1fr auto;gap:0}
-.bdrows .rc{padding:16px 0;border-bottom:1px solid var(--hairline);text-align:right;font-variant-numeric:tabular-nums;font-weight:700;font-size:20px}
-.bdrows .rc.lbl{text-align:left;font-weight:600;font-size:15px;color:var(--text);display:flex;align-items:center;gap:10px}
-.bdrows .rc.lbl i{width:10px;height:10px;border-radius:50%;display:inline-block;flex:none}
-.bdrows .rc.buy{color:var(--coral)}
-.bdrows .rc.rent{color:var(--moxie-blue)}
-.bdrows .rc.diff-lbl{color:var(--text-muted);text-transform:uppercase;font-size:11px;letter-spacing:.05em;font-weight:600;align-self:center}
-.bdrows .rc.diffval{font-size:15px;font-weight:600;color:var(--text);border-bottom:none}
-.bdrows .rc.diff-lbl{border-bottom:none}
-.bdnote{font-size:12px;color:var(--text-muted);margin-top:16px;line-height:1.5}
-.bdtrend{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px}
-@media(max-width:560px){.bdtrend{grid-template-columns:1fr}}
-.bdtrend-item{display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border-radius:10px;font-size:12.5px;line-height:1.4;color:var(--text)}
-.bdtrend-item.up{background:rgba(244,103,68,.08)}
-.bdtrend-item.down{background:rgba(40,181,207,.10)}
-.bdtrend-arrow{font-weight:700;font-size:16px;line-height:1.2;flex:none}
-.bdtrend-item.up .bdtrend-arrow{color:var(--coral)}
-.bdtrend-item.down .bdtrend-arrow{color:var(--moxie-blue)}
-@media(max-width:560px){
-  .bdrows .rc{font-size:17px}
-  .bdrows .rc.diffval{font-size:13px}
-}
-
-/* chart */
-.chartwrap{
-  background:var(--card);border:1px solid var(--hairline);border-radius:var(--radius-lg);
-  padding:var(--sp-4) var(--sp-4) var(--sp-3);position:relative;box-shadow:var(--shadow);
-}
-.legend{display:flex;gap:var(--sp-3);margin-bottom:var(--sp-2)}
-.legend span{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--text-muted)}
-.legend i{width:14px;height:3px;border-radius:2px;display:inline-block}
-.legend .b{background:var(--coral)}.legend .r{background:var(--moxie-blue)}
-.chart svg{display:block;width:100%;height:auto;touch-action:none}
-.drawline{stroke-dasharray:var(--len);stroke-dashoffset:var(--len);animation:draw 1s ease .1s forwards}
-@keyframes draw{to{stroke-dashoffset:0}}
-@media(prefers-reduced-motion:reduce){.drawline{animation:none;stroke-dashoffset:0}}
-.scrub-read{
-  display:flex;gap:var(--sp-3);flex-wrap:wrap;margin-top:12px;padding-top:12px;
-  border-top:1px solid var(--hairline);font-size:13px;
-}
-.scrub-read .yr{color:var(--text-muted);font-weight:600}
-.scrub-read .b{color:var(--coral);font-weight:600;font-variant-numeric:tabular-nums}
-.scrub-read .r{color:var(--moxie-blue);font-weight:600;font-variant-numeric:tabular-nums}
-
-/* money-goes: itemized monthly cost comparison */
-.mg-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-3)}
-@media(max-width:640px){.mg-grid{grid-template-columns:1fr}}
-.mg-col{
-  background:var(--card);border:1px solid var(--hairline);border-radius:var(--radius-lg);
-  box-shadow:var(--shadow);padding:var(--sp-3) var(--sp-4) 6px;
-}
-.mg-col-rent{display:flex;flex-direction:column}
-.mg-edit-wrap{margin-top:auto;padding-top:14px;padding-bottom:12px;display:flex;justify-content:flex-end}
-.btn.btn-sm{font-size:12px;padding:7px 14px;min-width:0}
-.mg-head{
-  font-family:var(--disp);font-weight:700;font-size:17px;letter-spacing:-.01em;
-  padding-bottom:10px;margin-bottom:6px;border-bottom:1px solid var(--hairline);
-}
-.mg-head.buy{color:var(--moxie-blue)}
-.mg-head.rent{color:var(--coral)}
-.mg-row{display:flex;align-items:center;gap:9px;padding:9px 0;border-bottom:1px solid var(--surface)}
-.mg-row:last-child{border-bottom:none}
-.mg-dot{width:10px;height:10px;border-radius:3px;flex:none}
-.mg-label{flex:1;font-size:13.5px;color:var(--text);min-width:0}
-.mg-label em{color:var(--positive);font-style:normal;font-size:12px;font-weight:600}
-.mg-val{font-variant-numeric:tabular-nums;font-weight:700;font-size:15px;color:var(--text);white-space:nowrap}
-.mg-val small{font-weight:500;font-size:11px;color:var(--text-muted);margin-left:1px}
-.mg-val.pos{color:var(--positive)}
-.mg-subtotal{
-  display:flex;align-items:center;gap:9px;padding:11px 0 10px;margin-top:2px;
-  border-top:2px solid var(--hairline);
-}
-.mg-subtotal .mg-label{font-weight:700;font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted)}
-.mg-subtotal .mg-val{font-size:18px}
-.mg-row.kept{background:rgba(27,158,119,.06);margin:6px -12px 0;padding:10px 12px;border-radius:8px;border-bottom:none}
-.mg-row.kept.muted{background:var(--surface)}
-.mg-row.kept.muted .mg-label,.mg-row.kept.muted .mg-val{color:var(--text-muted)}
-.mg-note{font-size:13px;color:var(--text-muted);margin-top:14px;line-height:1.5}
-
-/* forced piggy-bank callout under the cost/savings grid */
-.mg-piggy{
-  position:relative;display:flex;align-items:center;gap:16px;margin-top:18px;
-  padding:18px 20px 18px 18px;border-radius:var(--radius-lg);
-  background:rgba(27,158,119,.07);border:1px solid rgba(27,158,119,.22);
-}
-.mg-piggy-icon{
-  width:52px;height:52px;border-radius:14px;flex:none;
-  background:var(--positive);color:#fff;
-  display:inline-flex;align-items:center;justify-content:center;
-  box-shadow:0 4px 12px rgba(27,158,119,.32);
-}
-.mg-piggy-icon svg{width:30px;height:30px}
-.mg-piggy-title{font-family:var(--disp);font-weight:700;font-size:15.5px;letter-spacing:-.01em;color:var(--positive);margin-bottom:4px}
-.mg-piggy-text p{font-size:13px;color:var(--text);line-height:1.55;margin:0}
-.mg-piggy-text b{font-weight:700;font-variant-numeric:tabular-nums}
-/* hand-drawn arrow curving down from the principal row into the callout */
-.mg-arrow{
-  position:absolute;top:-46px;left:34px;width:66px;height:56px;overflow:visible;
-  pointer-events:none;opacity:.9;
-}
-@media(max-width:640px){
-  .mg-arrow{left:14px;top:-40px;width:54px;height:46px}
-}
-
-/* equity source split (down + appreciation + principal) */
-.eqsplit{margin-top:var(--sp-4);padding-top:var(--sp-4);border-top:1px dashed var(--hairline)}
-.eqsplit-head{font-size:14px;color:var(--text);font-weight:600;margin-bottom:12px}
-.eqsplit-head b{color:var(--text);font-weight:700;font-variant-numeric:tabular-nums}
-.eqsplit-bar{display:flex;height:34px;border-radius:var(--radius);overflow:hidden;border:1px solid var(--hairline)}
-.eqsplit-bar span{height:100%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:var(--on-accent);min-width:0;white-space:nowrap;overflow:hidden}
-.eqsplit-key{display:flex;flex-wrap:wrap;gap:10px 18px;margin-top:12px}
-.eqsplit-key span{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--text-muted)}
-.eqsplit-key i{width:11px;height:11px;border-radius:3px;display:inline-block;flex:none}
-.eqsplit-key b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
-
-/* table */
-.tablewrap{border:1px solid var(--hairline);border-radius:var(--radius-lg);overflow:hidden;background:var(--card);box-shadow:var(--shadow)}
-.tscroll{overflow-x:auto;max-height:520px;overflow-y:auto}
-table{width:100%;border-collapse:collapse;font-size:13px}
-thead th{
-  position:sticky;top:0;background:var(--surface-2);z-index:2;
-  text-align:right;padding:11px 14px;font-size:11px;letter-spacing:.04em;
-  text-transform:uppercase;color:var(--text-muted);font-weight:600;
-  border-bottom:1px solid var(--hairline);white-space:nowrap;
-}
-thead th:first-child{text-align:left}
-tbody td{padding:10px 14px;text-align:right;border-bottom:1px solid var(--hairline);font-variant-numeric:tabular-nums;white-space:nowrap}
-tbody td:first-child{text-align:left;color:var(--text-muted);font-weight:600}
-tbody tr:last-child td{border-bottom:none}
-tbody tr.be td{border-top:1px solid var(--coral);border-bottom:1px solid var(--coral);background:rgba(244,103,68,.05)}
-tbody tr.be td:first-child{position:relative}
-tbody tr.be td:first-child::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--coral)}
-tbody tr.be td:first-child .bmark{color:var(--coral);font-size:10px;letter-spacing:.05em;text-transform:uppercase;display:block;margin-top:2px}
-.pos{color:var(--positive)}
-.neg{color:var(--text-muted)}
-.showall{width:100%;padding:12px;background:var(--surface);border-top:1px solid var(--hairline);color:var(--text-muted);font-size:13px;font-weight:600}
-.showall:hover{color:var(--text)}
-
-/* what would change */
-.levers{display:grid;gap:12px}
-.lever{
-  display:flex;gap:12px;align-items:flex-start;
-  padding:16px 18px;background:var(--card);border:1px solid var(--hairline);
-  border-left:3px solid var(--moxie-blue);border-radius:var(--radius);font-size:14px;box-shadow:var(--shadow);
-}
-.lever .k{color:var(--text-muted);flex:none;font-size:11px;letter-spacing:.04em;text-transform:uppercase;font-weight:600;padding-top:2px;width:74px}
-.lever b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
-
-/* section 5 summary */
-.summary{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-@media(max-width:640px){.summary{grid-template-columns:1fr}}
-.sum-card{
-  display:flex;gap:14px;align-items:flex-start;
-  padding:18px 20px;background:var(--card);border:1px solid var(--hairline);
-  border-radius:var(--radius-lg);box-shadow:var(--shadow);
-}
-.sum-icon{
-  width:40px;height:40px;border-radius:10px;flex:none;
-  display:inline-flex;align-items:center;justify-content:center;
-}
-.sum-icon svg{width:22px;height:22px}
-.sum-icon.blue{background:var(--surface-2);color:var(--moxie-blue)}
-.sum-icon.green{background:rgba(27,158,119,.12);color:var(--positive)}
-.sum-icon.coral{background:rgba(244,103,68,.10);color:var(--coral)}
-.sum-title{font-family:var(--disp);font-weight:700;font-size:15px;letter-spacing:-.01em;margin-bottom:6px;line-height:1.25}
-.sum-text p{font-size:13px;color:var(--text-muted);line-height:1.55;margin:0}
-.sum-text b{color:var(--text);font-weight:700;font-variant-numeric:tabular-nums}
-
-/* disclosure */
-details.hon{border:1px solid var(--hairline);border-radius:var(--radius-lg);background:var(--card);box-shadow:var(--shadow)}
-details.hon > summary{
-  list-style:none;cursor:pointer;padding:14px 16px;font-weight:600;font-size:14px;
-  display:flex;justify-content:space-between;align-items:center;
-}
-details.hon > summary::-webkit-details-marker{display:none}
-details.hon > summary .chev{color:var(--text-muted);transition:transform .15s}
-details.hon[open] > summary .chev{transform:rotate(180deg)}
-details.hon .body{padding:0 16px 16px;font-size:13px;color:var(--text-muted);line-height:1.6}
-details.hon .body ul{margin:8px 0 0;padding-left:18px}
-details.hon .body li{margin-bottom:4px}
-details.hon .body .note{margin-top:14px;padding-top:14px;border-top:1px solid var(--hairline);color:var(--text)}
-
-/* CTA */
-.cta{
-  display:flex;justify-content:space-between;align-items:center;gap:var(--sp-4);
-  flex-wrap:wrap;margin-top:var(--sp-3);
-  background:var(--text);
-  background-image:radial-gradient(120% 140% at 0% 0%, rgba(40,181,207,.20) 0%, rgba(40,181,207,0) 45%),
-                   radial-gradient(120% 140% at 100% 100%, rgba(244,103,68,.22) 0%, rgba(244,103,68,0) 45%);
-  border-radius:var(--radius-lg);
-  padding:var(--sp-5);
-  box-shadow:0 12px 32px rgba(13,20,36,.18);
-  color:var(--on-accent);
-}
-.cta .txt{flex:1 1 320px;min-width:0}
-.cta .txt .cta-eyebrow{
-  display:inline-block;font-size:11px;letter-spacing:.09em;text-transform:uppercase;font-weight:700;
-  color:var(--brand-cyan);margin-bottom:8px;
-}
-.cta .txt h4{font-family:var(--disp);font-weight:700;font-size:24px;letter-spacing:-.02em;margin-bottom:6px;color:#fff;line-height:1.15}
-.cta .txt p{color:rgba(255,255,255,.75);font-size:13.5px;line-height:1.5}
-.cta .acts{display:flex;gap:12px;flex-wrap:wrap;flex:none}
-.cta .acts .btn.primary{box-shadow:0 6px 18px rgba(244,103,68,.4)}
-.cta .acts .btn.ghost{
-  background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.28);color:#fff;
-}
-.cta .acts .btn.ghost:hover{background:rgba(255,255,255,.16)}
-@media(max-width:720px){
-  .cta{padding:var(--sp-4);flex-direction:column;align-items:stretch;text-align:center}
-  .cta .txt{max-width:none}
-  .cta .acts{justify-content:center}
-  .cta .acts .btn{flex:1;min-width:150px;justify-content:center}
-}
-
-.err{color:var(--coral);font-size:12px;margin-top:6px;display:none}
-.err.show{display:block}
-.foot{margin-top:var(--sp-5);padding-top:var(--sp-3);border-top:1px solid var(--hairline);font-size:11px;color:var(--text-muted);line-height:1.5}
-/* ---------- branded print header (shown on print, hidden on screen) ---------- */
-.print-header{display:none}
-.ph-brand{display:flex;align-items:center;gap:8px}
-.ph-dot{width:12px;height:12px;border-radius:50%;background:var(--coral);display:inline-block}
-.ph-name{font-family:var(--disp);font-weight:700;font-size:18px;letter-spacing:-.02em;color:#fff}
-.ph-nmls{font-size:10px;color:rgba(255,255,255,.7);margin-left:auto;letter-spacing:.03em}
-.ph-title{font-family:var(--disp);font-weight:700;font-size:26px;letter-spacing:-.02em;color:#fff;margin-top:14px}
-.ph-sub{font-size:12px;color:rgba(255,255,255,.8);margin-top:4px}
-.ph-meta{font-size:11px;color:rgba(255,255,255,.7);margin-top:10px;border-top:1px solid rgba(255,255,255,.18);padding-top:8px}
-
-@media print{
-  /* only show the results report; hide the wizard, promo, sticky bars, overlays, interactive-only bits */
-  .work, .mbar, .calc-overlay, .head, .horizon, .scrub-read,
-  #editBtn, .inputstrip .edit{ display:none !important; }
-  .shell{min-height:0;padding:0}
-  body{background:#fff}
-  .results{margin-top:0}
-
-  /* the branded band across the top */
-  .print-header{
-    display:block;background:var(--text);color:#fff;
-    border-radius:12px;padding:20px 22px;margin-bottom:18px;
-    -webkit-print-color-adjust:exact;print-color-adjust:exact;
+    // 2) Update if found, else create.
+    if (existingId) {
+      var upd = buildUpdatePayload(body, name, email, phone);
+      var r1 = loftyFetch(token, 'put', LOFTY_BASE + '/' + existingId, upd);
+      if (r1.ok) return json({ ok: true, action: 'updated', leadId: existingId, lofty: r1.data });
+      return json({ ok: false, action: 'update', error: 'lofty ' + r1.code, detail: r1.text });
+    } else {
+      var crt = buildCreatePayload(body, name, email, phone);
+      var r2 = loftyFetch(token, 'post', LOFTY_BASE, crt);
+      if (r2.ok) return json({ ok: true, action: 'created', lofty: r2.data });
+      return json({ ok: false, action: 'create', error: 'lofty ' + r2.code, detail: r2.text });
+    }
+  } catch (err) {
+    return json({ ok: false, error: String(err) });
   }
-  /* keep brand fills when printing */
-  .figrow, .horizon, .chartwrap, .mg-row.kept, .eqsplit-bar span,
-  .promo, .fig .v, .verdict .yr{ -webkit-print-color-adjust:exact;print-color-adjust:exact; }
-
-  /* avoid awkward page breaks inside cards */
-  .sec, .figrow, .chartwrap, .breakdown, table{ break-inside:avoid; page-break-inside:avoid; }
-  .results{font-size:12px}
-  a[href]:after{content:""}
 }
 
-</style>
-</head>
-<body>
-<div class="shell">
-
-  <!-- header -->
-  <header class="head">
-    <nav class="progress" id="progress" aria-label="Progress">
-      <button class="pstep" data-step="0" data-state="active"><span class="num">1</span><span class="lbl">Your situation</span></button>
-      <span class="psep"></span>
-      <button class="pstep" data-step="1"><span class="num">2</span><span class="lbl">Costs &amp; profile</span></button>
-      <span class="psep"></span>
-      <button class="pstep" data-step="2"><span class="num">3</span><span class="lbl">Results</span></button>
-    </nav>
-  </header>
-
-  <!-- form + rail -->
-  <div class="work" id="work">
-    <div class="stepwrap">
-      <!-- STEP 1 -->
-      <section class="step" data-panel="0">
-        <h2>Should you keep renting, or buy?</h2>
-        <p class="sub">Compare how renting versus buying a home will affect your budget and net worth over time. Takes about 90 seconds.</p>
-        <div class="grid bento">
-          <div class="field">
-            <div class="inwell"><span class="flab">Home price <span class="req">*</span></span><span class="pre">$</span><input id="price" inputmode="decimal" data-money value="400,000"></div>
-            <p class="helper">The purchase price you're considering.</p>
-          </div>
-
-          <div class="field">
-            <div class="inwell" id="dpWell">
-              <span class="flab">Down payment <span class="req">*</span></span>
-              <input id="down" inputmode="decimal" value="10"><span class="suf" id="dpSuf">%</span>
-              <div class="seg sm dpToggle" role="group" aria-label="Down payment unit">
-                <button type="button" id="dpPct" aria-pressed="true">%</button>
-                <button type="button" id="dpDol" aria-pressed="false">$</button>
-              </div>
-            </div>
-            <p class="helper" id="dpHelp">Below 20% adds mortgage insurance.</p>
-          </div>
-
-          <div class="field">
-            <div class="inwell"><span class="flab">Interest rate <span class="req">*</span></span><input id="rate" inputmode="decimal" value="6.75"><span class="suf">%</span></div>
-            <p class="helper">Your annual mortgage rate.</p>
-          </div>
-
-          <div class="field">
-            <div class="inwell" id="zipWell"><span class="flab">ZIP or state <span class="req">*</span><span class="tip" tabindex="0">?<span class="tipbox">We use your ZIP or state to estimate the local property tax rate, which affects the cost of owning. Enter a 5-digit ZIP or a 2-letter state (e.g. TX).</span></span></span><input id="zip" value="" placeholder="e.g. 33024" inputmode="numeric" required></div>
-            <p class="helper" id="zipHelp">Sets your estimated property tax rate.</p>
-            <p class="err" id="zipErr">Enter a valid 5-digit ZIP code or 2-letter state.</p>
-          </div>
-
-          <div class="field span2">
-            <div class="inwell"><span class="flab">Current monthly rent <span class="req">*</span></span><span class="pre">$</span><input id="rent" inputmode="decimal" data-money value="2,200"></div>
-            <p class="helper">What you pay today.</p>
-          </div>
-        </div>
-      </section>
-
-      <!-- STEP 2 -->
-      <section class="step" data-panel="1" hidden>
-        <h2>Ongoing costs</h2>
-        <p class="sub">The recurring costs of owning and renting, so the comparison is fair.</p>
-        <div class="grid bento">
-          <div class="field">
-            <div class="inwell"><span class="flab">Homeowners insurance <span class="req">*</span></span><span class="pre">$</span><input id="ins" inputmode="decimal" data-money value="1,800"><span class="suf">/ yr</span></div>
-            <p class="helper">Annual premium. We inflate this 3% a year.</p>
-          </div>
-          <div class="field">
-            <div class="inwell"><span class="flab">HOA or condo dues <span class="req">*</span></span><span class="pre">$</span><input id="hoa" inputmode="decimal" data-money value="0"><span class="suf">/ mo</span></div>
-            <p class="helper">Monthly dues, if any. Leave at 0 for a single-family home.</p>
-          </div>
-          <div class="field span2">
-            <div class="inwell"><span class="flab">Renters insurance <span class="req">*</span></span><span class="pre">$</span><input id="rentIns" inputmode="decimal" data-money value="15"><span class="suf">/ mo</span></div>
-            <p class="helper">Cheap, but counts on the renting side for a fair comparison.</p>
-          </div>
-        </div>
-      </section>
-
-      <!-- nav -->
-      <div class="nav">
-        <button class="btn ghost" id="back" style="visibility:hidden">Back</button>
-        <button class="btn primary" id="next">Next: costs &amp; profile</button>
-      </div>
-    </div>
-
-    <!-- step 2 right column: financial profile + action box -->
-    <div class="fincol" id="fincol">
-      <aside class="finprofile" id="finprofile" aria-label="Financial profile">
-        <h2>Financial profile</h2>
-        <p class="sub">This helps us estimate your tax benefits and loan terms.</p>
-        <div class="grid bento">
-          <div class="field span2">
-            <div class="inwell"><span class="flab">Annual household income <span class="req">*</span> <span class="tip" tabindex="0">?<span class="tipbox">We map your income to a federal marginal tax bracket to estimate the value of deducting mortgage interest and property tax. Assumes a single filer.</span></span></span><span class="pre">$</span><input id="income" inputmode="decimal" data-money value="120,000"></div>
-            <p class="helper">Used to estimate your tax bracket and the deduction owning gives you.</p>
-          </div>
-          <div class="field span2">
-            <div class="inwell"><span class="flab">Credit score <span class="req">*</span> <span class="tip" tabindex="0">?<span class="tipbox">A rough guide only. A stronger credit score generally qualifies you for a lower interest rate — talk to a Moxie loan officer for your actual rate.</span></span></span><input id="credit" inputmode="numeric" value="740"></div>
-            <p class="helper" id="creditHelp">Higher scores usually mean a lower rate.</p>
-          </div>
-        </div>
-      </aside>
-      <div class="actionbox" id="actionbox">
-        <div class="actioncopy">
-          <div class="ac-title">You're all set — see the payoff</div>
-          <div class="ac-sub">We'll show you the exact year buying beats renting and how much wealth you'd build.</div>
-        </div>
-        <button class="btn primary" id="resultsBtn">See my results</button>
-      </div>
-    </div>
-
-    <!-- step 1 promo (static, dark) -->
-    <aside class="promo" id="promo">
-      <h3 class="promo-title">Is renting costing you? You could be leaving money on the table.</h3>
-      <p class="promo-sub">Compare the cost of renting with the potential value of owning.</p>
-      <ul class="promo-list">
-        <li>Compare monthly costs</li>
-        <li>Estimate potential equity gains</li>
-        <li>See the long-term difference</li>
-      </ul>
-    </aside>
-  </div>
-
-  <!-- mobile sticky bar -->
-  <div class="mbar" id="mbar">
-    <div class="row">
-      <div class="c"><div class="l">Payment</div><div class="v buy tab" id="mPay">$0</div></div>
-      <div class="c"><div class="l">Rent</div><div class="v rent tab" id="mRent">$0</div></div>
-      <div class="c"><div class="l">At closing</div><div class="v tab" id="mCash">$0</div></div>
-    </div>
-  </div>
-
-  <!-- calculating animation -->
-  <div class="calc-overlay" id="calcOverlay" aria-hidden="true">
-    <div class="calc-card">
-      <div class="calc-ring"><span></span><span></span><span></span></div>
-      <div class="calc-title">Crunching the numbers</div>
-      <div class="calc-steps" id="calcSteps">
-        <span>Amortizing your loan</span>
-        <span>Projecting home equity</span>
-        <span>Comparing to renting</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- lead capture modal (Email me these results) -->
-  <div class="modal-overlay" id="leadModal" aria-hidden="true">
-    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="leadTitle">
-      <button class="modal-close" id="leadClose" aria-label="Close">&times;</button>
-      <div class="modal-body" id="leadFormWrap">
-        <h3 id="leadTitle">Email me these results</h3>
-        <p class="modal-sub">We'll send your personalized rent vs. buy analysis and have a Moxie loan officer reach out if you'd like.</p>
-        <div class="modal-field">
-          <label for="leadName">Full name</label>
-          <input id="leadName" type="text" autocomplete="name" placeholder="Jane Smith">
-        </div>
-        <div class="modal-field">
-          <label for="leadEmail">Email</label>
-          <input id="leadEmail" type="email" autocomplete="email" inputmode="email" placeholder="jane@email.com">
-        </div>
-        <div class="modal-field">
-          <label for="leadPhone">Phone</label>
-          <input id="leadPhone" type="tel" autocomplete="tel" inputmode="tel" placeholder="(555) 123-4567">
-        </div>
-        <p class="modal-err" id="leadErr"></p>
-        <button class="btn primary modal-submit" id="leadSubmit">Send my results</button>
-        <p class="modal-fine">By submitting, you agree a Moxie Mortgage loan officer may contact you. Estimate only, not a loan offer.</p>
-      </div>
-      <div class="modal-success" id="leadSuccess" hidden>
-        <div class="modal-check">&#10003;</div>
-        <h3>You're all set</h3>
-        <p id="leadSuccessMsg">Your results are on the way. A Moxie loan officer will follow up shortly.</p>
-        <button class="btn ghost" id="leadDone">Done</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- ============ RESULTS ============ -->
-  <div class="results hidden" id="results" aria-live="polite">
-    <div class="print-header" id="printHeader" aria-hidden="true">
-      <div class="ph-brand">
-        <span class="ph-dot"></span>
-        <span class="ph-name">Moxie Mortgage</span>
-        <span class="ph-nmls">NMLS #1660690</span>
-      </div>
-      <div class="ph-title">Rent vs. Buy Analysis</div>
-      <div class="ph-sub" id="phSub">A personalized comparison of renting versus buying a home over time.</div>
-      <div class="ph-meta" id="phMeta"></div>
-    </div>
-    <div class="inputstrip" id="inputStrip"><span class="edit">Your inputs</span></div>
-
-    <div class="verdict">
-      <div class="big" id="verdictBig"></div>
-      <p class="ctx" id="verdictCtx"></p>
-    </div>
-
-    <div class="figrow figrow-3">
-      <div class="fig"><div class="l">Buying's net worth advantage <span class="tip tip-left" tabindex="0">?<span class="tipbox">Your net worth as an owner minus your net worth as a renter, at your chosen time horizon. Owner net worth = your home equity (which includes your down payment) minus all the other cash you've put in (closing and payments, less tax savings). Renter net worth = the rent you've paid, which builds no asset. A negative number early on means the up-front costs of buying haven't been outrun yet.</span></span></div><div class="v tab" id="figGap"></div></div>
-      <div class="fig"><div class="l">Home equity you'd build</div><div class="v tab" id="figEquity"></div></div>
-      <div class="fig"><div class="l">Tax savings from owning <span class="tip tip-right" tabindex="0">?<span class="tipbox">The estimated value of deducting your mortgage interest plus property tax (capped at the $10k SALT limit) at your marginal tax rate, added up over your time in the home. It's a benefit renters can't claim. Based on your income's federal marginal tax bracket. Consult a tax professional for your specific situation.</span></span></div><div class="v tab" id="figTax"></div></div>
-    </div>
-
-    <div class="horizon">
-      <div class="horizon-head">
-        <span class="horizon-label">Time horizon — drag to explore</span>
-        <span class="horizon-val"><b id="yearsN">30</b> years</span>
-      </div>
-      <div class="horizon-slider">
-        <input type="range" id="years" min="1" max="30" step="1" value="30" aria-label="How long you'd stay in the home">
-        <div class="horizon-ticks"><span>1 yr</span><span>15 yrs</span><span>30 yrs</span></div>
-      </div>
-    </div>
-
-    <div class="sec">
-      <div class="eyebrow"><span class="step-n">1</span>How your wealth grows</div>
-      <h3>The wealth you build over time</h3>
-      <p class="lead">Your down payment isn't a loss — it's day-one equity you own outright. From there, your equity grows two ways: the home appreciates in value, and every mortgage payment pays down your loan. Renting builds none of this — the coral area is wealth you keep.</p>
-      <div class="chartwrap">
-        <div class="legend"><span><i class="b"></i>Home equity (buying)</span><span><i class="r"></i>Renting</span></div>
-        <div class="chart" id="chart"></div>
-        <div class="scrub-read"><span class="yr" id="scrubYr">Year 0</span><span class="b" id="scrubBuy">Equity $0</span><span class="r" id="scrubRent">Renting $0</span></div>
-        <div class="eqsplit" id="eqSplit">
-          <div class="eqsplit-head">Where that <b id="eqTotal">$0</b> of equity comes from</div>
-          <div class="eqsplit-bar" id="eqBar"></div>
-          <div class="eqsplit-key" id="eqKey"></div>
-        </div>
-      </div>
-    </div>
-
-    <div class="sec sec-tint">
-      <div class="eyebrow"><span class="step-n">2</span>What it costs month to month</div>
-      <h3>Your cost breakdown</h3>
-      <p class="lead">These are your <b>starting</b> costs — the initial costs for the first year. They don't stay put: rent climbs every year, while the true costs of a fixed mortgage payment decrease over time as the loan amortizes.</p>
-      <div class="breakdown">
-        <div class="seg bdtabs" role="group" aria-label="Cost breakdown period">
-          <button type="button" class="bdtab" data-period="monthly" aria-pressed="true">Monthly</button>
-          <button type="button" class="bdtab" data-period="annual" aria-pressed="false">Annual</button>
-          <button type="button" class="bdtab" data-period="total" aria-pressed="false">Total</button>
-        </div>
-        <div class="bdrows" id="bdRows"></div>
-        <div class="bdtrend">
-          <div class="bdtrend-item up"><span class="bdtrend-arrow">↑</span><div><b>Rent rises</b> about 3% a year — your cost keeps climbing.</div></div>
-          <div class="bdtrend-item down"><span class="bdtrend-arrow">↓</span><div><b>Owning holds and eases</b> — your monthly payment is fixed, but the principal portion increases &amp; the interest portion decreases each month.</div></div>
-        </div>
-        <p class="bdnote" id="bdNote"></p>
-      </div>
-    </div>
-
-    <div class="sec">
-      <div class="eyebrow"><span class="step-n">3</span>Cost vs. savings, side by side</div>
-      <h3>Where your money goes each month</h3>
-      <p class="lead">Every renter dollar is gone for good. With buying, part of your payment is <b>principal</b> — savings that move straight into your equity, like a forced piggy bank.</p>
-      <div class="moneygo" id="moneygo"></div>
-    </div>
-
-    <div class="sec sec-tint sec-dark">
-      <div class="eyebrow"><span class="step-n">4</span>The bottom line</div>
-      <h3>Why buying wins over time</h3>
-      <div class="summary" id="summary"></div>
-    </div>
-
-    <div class="sec sec-tint">
-      <div class="eyebrow"><span class="step-n">5</span>Explore the levers</div>
-      <h3>What would change this</h3>
-      <p class="lead">Each line re-runs the model with one thing changed.</p>
-      <div class="levers" id="levers"></div>
-    </div>
-
-    <div class="cta">
-      <div class="txt">
-        <span class="cta-eyebrow">Ready to make it real?</span>
-        <h4>See what you'd actually qualify for</h4>
-        <p>This is an estimate, not a loan offer. A Moxie loan officer can turn these numbers into a real rate based on your finances — no obligation.</p>
-      </div>
-      <div class="acts">
-        <a class="btn primary" href="https://moxie.my1003app.com/register" target="_blank" rel="noopener">Get a rate quote from Moxie</a>
-        <button class="btn ghost" id="emailBtn">Email me these results</button>
-      </div>
-    </div>
-
-    <div class="sec sec-assume">
-      <details class="hon">
-        <summary>Assumptions <span class="chev">▾</span></summary>
-        <div class="body" id="honBody"></div>
-      </details>
-    </div>
-  </div>
-
-</div>
-
-<script>
-"use strict";
-/* =====================================================================
-   HARDCODED ASSUMPTIONS — easy to update
-   STD_DEDUCTION   : standard deduction (itemizing is assumed for all borrowers)
-   SALT_CAP        : state/local tax deduction cap
-   ANNUAL_INFLATE  : yearly inflation on insurance & HOA
-   CLOSING_PCT     : closing costs as % of price (hidden from UI)
-   SELL_PCT        : cost to sell as % of sale price (hidden from UI)
-   MI_RATE         : mortgage insurance annual rate (% of loan), silent
-   TAX_BRACKETS    : IRS marginal-rate table used to map income -> marginal rate
-   ===================================================================== */
-const STD_DEDUCTION  = 14600;   // 2024 single-filer standard deduction
-const SALT_CAP       = 10000;   // SALT deduction cap on property tax
-const ANNUAL_INFLATE = 0.03;    // insurance & HOA inflate 3% / yr
-const CLOSING_PCT    = 3.0;     // closing costs = 3% of purchase price
-const SELL_PCT       = 5.0;     // cost to sell   = 5% of sale price
-const MI_RATE        = 0.55;    // mortgage insurance = 0.55%/yr of loan while <20% equity
-const APPRECIATION   = 3.25;    // home appreciation % / yr (assumed, not user input)
-const RENT_INCREASE  = 3.0;     // annual rent increase % / yr (assumed)
-const MAINT_PCT      = 1.0;     // maintenance & repairs % of value / yr (assumed)
-const MAX_HORIZON    = 30;      // model always runs the full horizon; results slider scrubs within it
-
-/* 2024 IRS marginal brackets, single filer. Lower bound -> rate.
-   Update these (and STD_DEDUCTION above) if filing status or tax year changes. */
-const TAX_BRACKETS = [
-  { upTo:  11600, rate:10 },
-  { upTo:  47150, rate:12 },
-  { upTo: 100525, rate:22 },
-  { upTo: 191950, rate:24 },
-  { upTo: 243725, rate:32 },
-  { upTo: 609350, rate:35 },
-  { upTo: Infinity, rate:37 }
-];
-function marginalRateFromIncome(income){
-  for(const b of TAX_BRACKETS){ if(income <= b.upTo) return b.rate; }
-  return 37;
+// GET just confirms the endpoint is alive (open the /exec URL in a browser).
+function doGet() {
+  return json({ ok: true, service: 'lofty-lead-intake', ready: true });
 }
 
-/* Average effective property tax rate by state (% of home value / yr).
-   Source: Tax Foundation / Census ACS effective rates. Update as needed. */
-const STATE_PROP_TAX = {
-  AL:0.40, AK:1.04, AZ:0.62, AR:0.62, CA:0.75, CO:0.51, CT:2.00, DE:0.58, DC:0.57,
-  FL:0.86, GA:0.90, HI:0.29, ID:0.63, IL:2.08, IN:0.84, IA:1.52, KS:1.34, KY:0.83,
-  LA:0.56, ME:1.24, MD:1.05, MA:1.14, MI:1.38, MN:1.11, MS:0.79, MO:0.97, MT:0.74,
-  NE:1.63, NV:0.55, NH:1.93, NJ:2.23, NM:0.67, NY:1.40, NC:0.80, ND:0.98, OH:1.53,
-  OK:0.89, OR:0.93, PA:1.49, RI:1.40, SC:0.57, SD:1.17, TN:0.66, TX:1.68, UT:0.57,
-  VT:1.83, VA:0.82, WA:0.87, WV:0.57, WI:1.61, WY:0.56
+/* ============================ Lofty search ============================ */
+
+/**
+ * Returns the leadId of an existing Lofty lead matching this email or phone,
+ * or null if none is found. Email is tried first (most reliable), then phone.
+ */
+function findExistingLeadId(token, email, phone) {
+  function search(param, value) {
+    if (!value) return null;
+    var url = LOFTY_BASE + '?preciseSearchFlag=true&limit=1&' +
+              param + '=' + encodeURIComponent(value);
+    var r = loftyFetch(token, 'get', url, null);
+    if (!r.ok || !r.data) return null;
+    var leads = r.data.leads || r.data.data || [];
+    if (leads.length && (leads[0].leadId || leads[0].id)) {
+      return leads[0].leadId || leads[0].id;
+    }
+    return null;
+  }
+  return search('email', email) || search('phone', phone && phone.replace(/^\+/, ''));
+}
+
+/* ==================== Build create / update payloads ==================== */
+
+/** Fields common to both create and update. */
+function baseLeadFields(body, name, email, phone) {
+  var contactable = body.consent === true;
+  var lead = {
+    firstName: name.firstName,
+    emails: email ? [email] : [],
+    phones: phone ? [phone] : [],
+    leadTypes: [2], // Buyer
+    source: String(body.source || 'MoxieMortgage.com'),
+    cannotCall: !contactable,
+    cannotText: !contactable,
+    cannotEmail: !contactable
+  };
+  if (name.lastName) lead.lastName = name.lastName;
+
+  // Address / property (any of these the form supplied).
+  var prop = {};
+  var city = str(body.city), state = str(body.state);
+  var zip = str(body.zip || body.zipCode), street = str(body.streetAddress || body.address);
+  if (city) prop.city = city;
+  if (state) prop.state = state;
+  if (zip) prop.zipCode = zip;
+  if (street) prop.streetAddress = street;
+  if (Object.keys(prop).length) lead.property = prop;
+
+  // Common mortgage/real-estate flags, only if the form sent them.
+  var tf = TIMEFRAME[String(body.purchaseTimeline || body.timeline || '')];
+  if (tf) lead.buyingTimeFrame = tf;
+  if (str(body.preQual)) lead.preQual = yesNo(body.preQual);
+  if (str(body.firstTimeBuyer || body.fthb)) lead.fthb = yesNo(body.firstTimeBuyer || body.fthb);
+  if (body.homePrice != null || body.mortgage) lead.mortgage = 'Yes';
+
+  return lead;
+}
+
+/** The tag for this lead, always shaped "CTA: <Title>". */
+function ctaTag(body) {
+  var raw = String(body.cta || body.tag || '').trim();
+  if (!raw) raw = 'General';
+  // normalize: strip an existing "CTA:" prefix so we don't double it
+  raw = raw.replace(/^\s*CTA:\s*/i, '');
+  return trim64('CTA: ' + raw);
+}
+
+/** New-lead payload (POST /v1.0/leads). */
+function buildCreatePayload(body, name, email, phone) {
+  var lead = baseLeadFields(body, name, email, phone);
+  lead.tags = [ctaTag(body)];
+  var note = buildNote(body, name, email, phone);
+  if (note) { lead.content = note; lead.isPin = true; }
+  var custom = buildCustomAttributes(body);
+  if (custom.length) lead.customAttributeList = custom;
+  return lead;
+}
+
+/** Existing-lead payload (PUT /v1.0/leads/{id}).
+ *  Uses tagsAdd so we KEEP the lead's existing tags and just add this CTA's tag.
+ *  Re-pins a note with the latest submission so the agent sees the newest intent. */
+function buildUpdatePayload(body, name, email, phone) {
+  var lead = baseLeadFields(body, name, email, phone);
+  lead.tagsAdd = [ctaTag(body)];   // additive — never wipes existing tags
+  var note = buildNote(body, name, email, phone);
+  if (note) { lead.content = note; lead.isPin = true; }
+  var custom = buildCustomAttributes(body);
+  if (custom.length) lead.customAttributeList = custom;
+  return lead;
+}
+
+/**
+ * Turns arbitrary extra form data into Lofty custom-field values. Reads from
+ * body.fields, body.inputs and body.results (any/all may be present). These only
+ * land in Lofty if you've created matching custom fields on your team AND you map
+ * them here by name; otherwise the same data is still captured in the pinned note
+ * below, so nothing is lost. Left as a safe pass-through: only include entries
+ * whose attributeName you know exists as a lead custom field in your Lofty team.
+ *
+ * To activate: fill CUSTOM_FIELD_MAP with { payloadKey: "Lofty Custom Field Name" }.
+ */
+var CUSTOM_FIELD_MAP = {
+  // Example (uncomment + match to your Lofty custom fields):
+  // homePrice: 'Home Price',
+  // downPayment: 'Down Payment',
+  // creditScore: 'Credit Score'
 };
-const DEFAULT_PROP_TAX = 1.10;   // national average, used if ZIP/state can't be resolved
 
-/* ZIP 3-digit prefix -> USPS state. Covers all assigned ranges. */
-const ZIP_PREFIX_STATE = (()=>{
-  const map={};
-  const add=(lo,hi,st)=>{ for(let z=lo; z<=hi; z++) map[String(z).padStart(3,'0')]=st; };
-  add(0,4,'CT');add(5,5,'NY');add(6,9,'PR');add(10,27,'MA');add(28,29,'RI');add(30,38,'NH');
-  add(39,49,'ME');add(50,59,'VT');add(60,69,'CT');add(70,89,'NJ');
-  add(100,149,'NY');add(150,196,'PA');add(197,199,'DE');
-  add(200,205,'DC');add(206,219,'MD');add(220,246,'VA');add(247,268,'WV');
-  add(270,289,'NC');add(290,299,'SC');add(300,319,'GA');add(320,349,'FL');
-  add(350,369,'AL');add(370,385,'TN');add(386,397,'MS');add(398,399,'GA');
-  add(400,427,'KY');add(430,459,'OH');add(460,479,'IN');add(480,499,'MI');
-  add(500,528,'IA');add(530,549,'WI');add(550,567,'MN');add(570,577,'SD');
-  add(580,588,'ND');add(590,599,'MT');add(600,629,'IL');add(630,658,'MO');
-  add(660,679,'KS');add(680,693,'NE');add(700,714,'LA');add(716,729,'AR');
-  add(730,749,'OK');add(750,799,'TX');add(800,816,'CO');add(820,831,'WY');
-  add(832,838,'ID');add(840,847,'UT');add(850,865,'AZ');add(870,884,'NM');
-  add(889,898,'NV');add(900,961,'CA');add(967,968,'HI');add(970,979,'OR');
-  add(980,994,'WA');add(995,999,'AK');
-  return map;
-})();
-
-const US_STATES = new Set(Object.keys(STATE_PROP_TAX));
-
-/* Resolve a ZIP or 2-letter state into { state, rate, resolved }. */
-function propTaxFromZip(raw){
-  const s=String(raw||'').trim().toUpperCase();
-  // 2-letter state code entered directly
-  if(/^[A-Z]{2}$/.test(s) && US_STATES.has(s)){
-    return { state:s, rate:STATE_PROP_TAX[s], resolved:true };
-  }
-  // 5-digit (or 5+) ZIP -> prefix -> state
-  const digits=s.replace(/[^0-9]/g,'');
-  if(digits.length>=3){
-    const st=ZIP_PREFIX_STATE[digits.slice(0,3)];
-    if(st && STATE_PROP_TAX[st]!=null){
-      return { state:st, rate:STATE_PROP_TAX[st], resolved:true };
+function buildCustomAttributes(body) {
+  var out = [];
+  var pools = [body.fields, body.inputs, body.results];
+  for (var p = 0; p < pools.length; p++) {
+    var pool = pools[p];
+    if (!pool || typeof pool !== 'object') continue;
+    for (var key in pool) {
+      if (!pool.hasOwnProperty(key)) continue;
+      var mapped = CUSTOM_FIELD_MAP[key];
+      if (!mapped) continue; // only send fields you've mapped to real Lofty custom fields
+      out.push({ attributeName: mapped, attributeType: 'text', value: String(pool[key]) });
     }
   }
-  return { state:null, rate:DEFAULT_PROP_TAX, resolved:false };
-}
-function isValidZipOrState(raw){
-  const s=String(raw||'').trim().toUpperCase();
-  if(/^[A-Z]{2}$/.test(s)) return US_STATES.has(s);
-  const digits=s.replace(/[^0-9]/g,'');
-  return digits.length===5;
+  return out;
 }
 
-/* ---------- state ---------- */
-const S = {
-  price:400000, downMode:'pct', down:10, rate:6.75, term:30, rent:2200, zip:'',
-  tax:DEFAULT_PROP_TAX, taxState:null, taxResolved:false, ins:1800, hoa:0, maint:MAINT_PCT,
-  years:MAX_HORIZON, appr:APPRECIATION, rentInc:RENT_INCREASE, income:120000, credit:740, rentIns:15
+/* =============================== Notes =============================== */
+
+/**
+ * A readable pinned note capturing the whole submission, so no form field is
+ * ever lost even if you haven't set up custom fields for it. Sections: contact,
+ * then every key from fields/inputs/results, then meta.
+ */
+function buildNote(body, name, email, phone) {
+  var lines = [];
+  var title = String(body.cta || body.tag || 'Lead').replace(/^\s*CTA:\s*/i, '');
+  lines.push(title.toUpperCase() + ' — SUBMISSION');
+  lines.push('');
+
+  lines.push('CONTACT');
+  if (name.firstName || name.lastName) lines.push('Name: ' + [name.firstName, name.lastName].filter(Boolean).join(' '));
+  if (email) lines.push('Email: ' + email);
+  if (phone) lines.push('Phone: ' + phone);
+  var loc = [str(body.streetAddress || body.address), str(body.city), str(body.state), str(body.zip || body.zipCode)].filter(Boolean).join(', ');
+  if (loc) lines.push('Location: ' + loc);
+
+  appendPool(lines, 'DETAILS', body.fields);
+  appendPool(lines, 'INPUTS', body.inputs);
+  appendPool(lines, 'RESULTS', body.results);
+
+  // A couple of well-known single fields some forms send flat.
+  var flat = [];
+  if (body.message) flat.push('Message: ' + String(body.message));
+  if (body.homePrice != null) flat.push('Home Price: ' + body.homePrice);
+  if (flat.length) { lines.push(''); lines.push('MORE'); lines.push.apply(lines, flat); }
+
+  lines.push('');
+  lines.push('Source: ' + String(body.source || 'MoxieMortgage.com'));
+  if (body.pageUrl) lines.push('Page: ' + String(body.pageUrl));
+  lines.push('Submitted: ' + formatWhen(body.submittedAt ? new Date(body.submittedAt) : new Date()));
+
+  return lines.join('\n').slice(0, 4000);
+}
+
+function appendPool(lines, heading, pool) {
+  if (!pool || typeof pool !== 'object') return;
+  var keys = Object.keys(pool);
+  if (!keys.length) return;
+  lines.push('');
+  lines.push(heading);
+  for (var i = 0; i < keys.length; i++) {
+    lines.push(prettyKey(keys[i]) + ': ' + String(pool[keys[i]]));
+  }
+}
+
+/* ============================== Lofty fetch ============================== */
+
+/**
+ * Single place that talks to Lofty. Returns { ok, code, text, data }.
+ * Lofty API keys authenticate as "token <key>" (NOT "Bearer <key>").
+ */
+function loftyFetch(token, method, url, payloadObj) {
+  var opts = {
+    method: method,
+    headers: { Authorization: 'token ' + token },
+    muteHttpExceptions: true
+  };
+  if (payloadObj != null) {
+    opts.contentType = 'application/json';
+    opts.payload = JSON.stringify(payloadObj);
+  }
+  var res = UrlFetchApp.fetch(url, opts);
+  var code = res.getResponseCode();
+  var text = res.getContentText();
+  return { ok: code >= 200 && code < 300, code: code, text: text, data: safeParse(text) };
+}
+
+/* ============================== Helpers ============================== */
+
+var TIMEFRAME = {
+  'buying-now': '1-3', '0-3-months': '1-3', '3-6-months': '3-6',
+  '6-plus-months': '6-12', 'researching': 'Just Looking', 'refinancing': 'Refinancing'
 };
-let step = 0;
 
-/* ---------- helpers ---------- */
-const $=id=>document.getElementById(id);
-const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
-const num=v=>{const n=parseFloat(String(v).replace(/[^0-9.\-]/g,''));return isFinite(n)?n:0;};
-const money=n=>'$'+Math.round(n).toLocaleString('en-US');
-const money0=n=>{const s=n<0?'-':'';return s+'$'+Math.abs(Math.round(n)).toLocaleString('en-US');};
-const commafy=n=>Math.round(n).toLocaleString('en-US');
+function str(v) { return v == null ? '' : String(v).trim(); }
+function yesNo(v) { var s = String(v).trim().toLowerCase(); return (s === 'yes' || s === 'true' || v === true) ? 'Yes' : 'No'; }
+function trim30(s) { return String(s || '').slice(0, 30); }
+function trim64(s) { return String(s || '').slice(0, 64); }
 
-/* ---------- read inputs into state ---------- */
-function readInputs(){
-  S.price=clamp(num($('price').value),0,1e9);
-  S.rate=clamp(num($('rate').value),0,25);
-  S.rent=clamp(num($('rent').value),0,1e7);
-  S.zip=$('zip').value.trim();
-  const dv=num($('down').value);
-  if(S.downMode==='pct') S.down=clamp(dv,0,100); else S.down=clamp(dv,0,S.price);
-  // property tax rate is derived from the ZIP / state, not typed
-  const pt=propTaxFromZip(S.zip);
-  S.taxState=pt.state;
-  S.taxResolved=pt.resolved;
-  S.tax=pt.rate;
-  S.ins=clamp(num($('ins').value),0,1e6);
-  S.hoa=clamp(num($('hoa').value),0,1e5);
-  S.income=clamp(num($('income').value),0,1e8);
-  const creditEl=$('credit');
-  if(creditEl) S.credit=clamp(Math.round(num(creditEl.value)),300,850);
-  S.rentIns=clamp(num($('rentIns').value),0,1e4);
-  // fixed / silent assumptions
-  S.maint=MAINT_PCT;
-  S.appr=APPRECIATION;
-  S.rentInc=RENT_INCREASE;
-  S.closing=CLOSING_PCT;
-  S.sellCost=SELL_PCT;
-  S.pmi=MI_RATE;
-  S.itemize=true;                          // all borrowers assumed to itemize
-  S.marg=marginalRateFromIncome(S.income); // marginal rate derived from income
-  // S.years is set by the results-page horizon slider (default MAX_HORIZON)
+function splitName(raw) {
+  var full = String(raw || '').trim().replace(/\s+/g, ' ');
+  if (!full) return { firstName: '' };
+  var parts = full.split(' ');
+  if (parts.length === 1) return { firstName: trim30(parts[0]) };
+  return { firstName: trim30(parts[0]), lastName: trim30(parts.slice(1).join(' ')) };
 }
 
-/* down payment in dollars regardless of mode */
-function downDollars(o=S){ return o.downMode==='pct' ? o.price*(o.down/100) : Math.min(o.down,o.price); }
+function toE164(phone) {
+  var digits = String(phone || '').replace(/[^\d]/g, '');
+  if (String(phone).trim().charAt(0) === '+') return '+' + digits;
+  if (digits.length === 10) return '+1' + digits;
+  if (digits.length === 11 && digits.charAt(0) === '1') return '+' + digits;
+  return digits ? '+' + digits : '';
+}
 
-/* =====================================================================
-   THE MODEL — monthly simulation
-   ===================================================================== */
-function simulate(o){
-  const price=o.price;
-  const down=downDollars(o);
-  const L=Math.max(0, price-down);
-  const i=(o.rate/100)/12;
-  const n=o.term*12;
-  const N=o.years*12;
+function prettyKey(k) {
+  return String(k)
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+}
 
-  // monthly P&I
-  let M=0;
-  if(L>0){ M = i>0 ? L*i/(1-Math.pow(1+i,-n)) : L/n; }
-
-  const apprM=Math.pow(1+o.appr/100,1/12)-1;
-  const pmiOn = down < price*0.20 && L>0;               // mortgage insurance, silent
-  const pmiMonthly = pmiOn ? (o.pmi/100*L)/12 : 0;
-
-  let bal=L, homeVal=price;
-  let rentNow=o.rent;
-  let insY=o.ins, hoaM=o.hoa; // inflate annually
-
-  // annual tax accumulators (itemizing is always assumed)
-  let intYr=0, taxYr=0;
-
-  // cumulative cash out of pocket
-  const closingCash = price*(o.closing/100);
-  let buyerCash  = down + closingCash;   // buyer's up-front cash
-  let renterCash = 0;                    // renter has no up-front asset cost
-
-  // outputs
-  const years=[];
-  let cumOwnerCost=0, cumRenterCost=0;   // recurring cash only (for cost totals & bars)
-  let yOwnerCost=0, yRenterCost=0;
-  let cumOwnerCostNoP=0, yOwnerCostNoP=0; // owner cost EXCLUDING principal (for the cost breakdown)
-  let breakevenMonth=-1;
-  let taxSavingsTotal=0;                  // cumulative homeowner tax benefit
-
-  // Two views:
-  //  (a) rigorous net worth for the gap ("walk away today vs spending nothing")
-  //       renter: -cumulative rent paid ; buyer: (home value - loan - sale cost) - buyer cash
-  //  (b) intuitive equity for the chart: the asset you own outright.
-  //       buyer: home equity = home value - loan balance. At day 0 this equals your
-  //       down payment (your money, not a loss); it then grows from appreciation +
-  //       principal paid. Selling costs are NOT subtracted here — you only incur them
-  //       if you sell, so they don't belong in your ongoing equity position.
-  //       renter: 0 (rent is gone; no asset is built)
-  const monthly={buyNW:[], rentNW:[], buyWealth:[], rentWealth:[]};
-  const nwBuy0  = (homeVal - bal) - buyerCash;   // equity - cash spent (no sale assumed)
-  const nwRent0 = -renterCash;
-  monthly.buyNW.push(nwBuy0);
-  monthly.rentNW.push(nwRent0);
-  monthly.buyWealth.push(homeVal - bal);   // gross equity; = down payment at t0
-  monthly.rentWealth.push(0);
-
-  for(let m=1;m<=N;m++){
-    // --- owner P&I split ---
-    let interest=0, principal=0;
-    if(L>0 && bal>0){
-      interest=bal*i;
-      principal=Math.min(M-interest, bal);
-      bal=Math.max(0,bal-principal);
+function formatWhen(d) {
+  try {
+    if (typeof Utilities !== 'undefined' && Utilities.formatDate) {
+      var tz = (typeof Session !== 'undefined' && Session.getScriptTimeZone)
+        ? Session.getScriptTimeZone() : 'America/New_York';
+      return Utilities.formatDate(d, tz, 'M/d/yyyy h:mm a');
     }
-    // mortgage insurance drops once equity reaches 20%
-    let pmiThis = (pmiOn && (bal/price)>0.80) ? pmiMonthly : 0;
-
-    // home value grows
-    homeVal*=(1+apprM);
-
-    // owner recurring (tax & maint on CURRENT value)
-    const propTaxM=(o.tax/100*homeVal)/12;
-    const maintM=(o.maint/100*homeVal)/12;
-    const insM=insY/12;
-    const ownerOut = (L>0?M:0) + pmiThis + propTaxM + insM + hoaM + maintM;
-
-    // renter recurring
-    const renterOut = rentNow + o.rentIns;
-
-    // accumulate annual tax pieces
-    intYr+=interest; taxYr+=propTaxM;
-
-    // cash out of pocket this month
-    buyerCash  += ownerOut;
-    renterCash += renterOut;
-
-    // track recurring costs for totals/bars
-    yOwnerCost += ownerOut;
-    yOwnerCostNoP += ownerOut - principal;   // same costs, minus principal (which builds equity)
-    yRenterCost += renterOut;
-
-    // --- year rollover ---
-    if(m%12===0){
-      // Homeowner tax benefit: mortgage interest + property tax (SALT-capped) are
-      // deductible for an itemizing owner. We credit the marginal-rate value of the
-      // Gross tax benefit: the value of deducting mortgage interest plus property
-      // tax (SALT-capped) at your marginal rate. This is the figure most rent-vs-buy
-      // calculators show. (A stricter "incremental vs. the standard deduction" method
-      // would be lower; we use gross for comparability.)
-      let benefit=0;
-      if(o.itemize){
-        const deductible = intYr + Math.min(taxYr, SALT_CAP);
-        benefit = deductible * (o.marg/100);
-      }
-      yOwnerCost -= benefit;     // reduces reported owner cost
-      yOwnerCostNoP -= benefit;  // same benefit reduces the principal-free cost
-      buyerCash  -= benefit;     // and is cash back to the buyer
-      taxSavingsTotal += benefit;
-
-      cumOwnerCost+=yOwnerCost; cumRenterCost+=yRenterCost;
-      cumOwnerCostNoP+=yOwnerCostNoP;
-      const yr=m/12;
-      const equity = homeVal - bal;
-      const buyNW  = (homeVal - bal) - buyerCash;   // equity - cash spent (no sale assumed)
-      const rentNW = -renterCash;
-      years.push({
-        year:yr,
-        ownerCost:yOwnerCost,
-        ownerCostNoP:yOwnerCostNoP,
-        renterCost:yRenterCost,
-        equity:equity,
-        homeVal:homeVal,
-        taxSaved:taxSavingsTotal,
-        portfolio:-renterCash,   // renter's running position (cash spent, no asset)
-        buyNW:buyNW,
-        rentNW:rentNW,
-        buyWealth: homeVal - bal,   // gross equity (down payment + appreciation + principal)
-        rentWealth: 0,
-        diff:buyNW-rentNW
-      });
-      // reset annual
-      intYr=0; taxYr=0; yOwnerCost=0; yOwnerCostNoP=0; yRenterCost=0;
-      // inflate & step rent
-      insY*=(1+ANNUAL_INFLATE); hoaM*=(1+ANNUAL_INFLATE);
-      rentNow*=(1+o.rentInc/100);
-    }
-
-    const buyNWm  = (homeVal - bal) - buyerCash;   // equity - cash spent (no sale assumed)
-    const rentNWm = -renterCash;
-    monthly.buyNW.push(buyNWm);
-    monthly.rentNW.push(rentNWm);
-    monthly.buyWealth.push(homeVal - bal);   // gross equity
-    monthly.rentWealth.push(0);
-    if(breakevenMonth<0 && buyNWm>=rentNWm) breakevenMonth=m;
-  }
-
-  // ---- spend breakdown over horizon (for stacked bars) ----
-  const bd=spendBreakdown(o);
-
-  // ---- cost table: monthly / annual / total ----
-  // The cost breakdown shows TRUE COST only — interest, taxes, insurance, HOA,
-  // maintenance and mortgage insurance, net of tax savings, plus one-time closing.
-  // Principal is EXCLUDED because it isn't a cost — it converts into equity you keep.
-  const y1Owner = years.length? years[0].ownerCostNoP : 0;   // carrying costs (no principal), net of tax benefit
-  const y1Rent  = years.length? years[0].renterCost : 0;
-  const oneTimeBuy  = closingCash;                         // closing costs only (no down payment)
-  const oneTimeRent = o.rent;                              // one month's deposit
-  const costTable = {
-    monthly: { buy:y1Owner/12, rent:y1Rent/12 },
-    annual:  { buy:y1Owner + oneTimeBuy, rent:y1Rent + oneTimeRent },
-    total:   { buy:cumOwnerCostNoP + oneTimeBuy, rent:cumRenterCost + oneTimeRent }
-  };
-
-  const lastYear = years.length ? years[years.length-1] : null;
-  const finalHomeValue = lastYear ? lastYear.homeVal : price;
-  return {
-    M, down, L, pmiOn,
-    years, monthly, breakevenMonth,
-    cumOwnerCash:cumOwnerCost,
-    cumRenterCash:cumRenterCost,
-    finalBuyNW: monthly.buyNW[N],
-    finalRentNW: monthly.rentNW[N],
-    finalEquity: lastYear ? lastYear.equity : down,
-    finalHomeVal: finalHomeValue,
-    // equity is built from three sources — surface each for the UI
-    equityFromDown: down,
-    equityFromAppreciation: Math.max(0, finalHomeValue - price),
-    equityFromPrincipal: bd.principal,
-    taxSavingsTotal,
-    downPayment: down,
-    breakdown:bd,
-    costTable,
-    cashAtClosing: down + price*(o.closing/100)
-  };
+  } catch (e) {}
+  try { return d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC'; }
+  catch (e2) { return String(d); }
 }
 
-/* separate pass to split owner spend into components for the bars */
-function spendBreakdown(o){
-  const price=o.price, down=downDollars(o), L=Math.max(0,price-down);
-  const i=(o.rate/100)/12, n=o.term*12, N=o.years*12;
-  let M=0; if(L>0){ M=i>0?L*i/(1-Math.pow(1+i,-n)):L/n; }
-  const apprM=Math.pow(1+o.appr/100,1/12)-1;
-  const pmiOn=down<price*0.20 && L>0;
-  const pmiMonthly=pmiOn?(o.pmi/100*L)/12:0;
-  let bal=L, homeVal=price, insY=o.ins, hoaM=o.hoa, rentNow=o.rent;
-  const B={pi:0,pmi:0,tax:0,ins:0,hoa:0,maint:0,principal:0,rent:0,rentIns:0};
-  for(let m=1;m<=N;m++){
-    let interest=0,principal=0;
-    if(L>0&&bal>0){interest=bal*i;principal=Math.min(M-interest,bal);bal=Math.max(0,bal-principal);}
-    let pmiThis=(pmiOn&&(bal/price)>0.80)?pmiMonthly:0;
-    homeVal*=(1+apprM);
-    B.pi += interest;               // interest is the true "cost"; principal separate
-    B.principal += principal;
-    B.pmi += pmiThis;
-    B.tax += (o.tax/100*homeVal)/12;
-    B.ins += insY/12;
-    B.hoa += hoaM;
-    B.maint += (o.maint/100*homeVal)/12;
-    B.rent += rentNow;
-    B.rentIns += o.rentIns;
-    if(m%12===0){ insY*=(1+ANNUAL_INFLATE); hoaM*=(1+ANNUAL_INFLATE); rentNow*=(1+o.rentInc/100); }
-  }
-  return B;
+function safeParse(text) { try { return JSON.parse(text); } catch (e) { return text; } }
+
+function json(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
-/* quick monthly payment for the rail (P&I + escrow-ish) */
-function railFigures(){
-  const price=S.price, down=downDollars(), L=Math.max(0,price-down);
-  const i=(S.rate/100)/12, n=S.term*12;
-  let M=0; if(L>0){ M=i>0?L*i/(1-Math.pow(1+i,-n)):L/n; }
-  const pmiOn=down<price*0.20 && L>0;
-  const pmiM=pmiOn?(S.pmi/100*L)/12:0;
-  const pay=M+pmiM+(S.tax/100*price)/12+S.ins/12+S.hoa+(S.maint/100*price)/12;
-  return {pay, rent:S.rent+S.rentIns, cash:down+price*(S.closing/100)};
+/* ============================== Test ============================== */
+
+// Run once from the editor to authorize outbound fetch and push a real test
+// lead into Lofty. Run it twice to confirm the 2nd run UPDATES (not duplicates).
+function testPing() {
+  var secret = PropertiesService.getScriptProperties().getProperty('SHARED_SECRET') || '';
+  var fake = { postData: { contents: JSON.stringify({
+    secret: secret,
+    name: 'Test Lead',
+    email: 'test-lead@example.com',
+    phone: '4104018688',
+    zip: '30301',
+    consent: true,
+    cta: 'Rent vs. Buy Calculator',
+    source: 'MoxieMortgage.com',
+    fields: { 'Home Price': '$400,000', 'Down Payment': '10%', 'Interest Rate': '6.75%' },
+    results: { 'Net Worth Advantage': '$1,093,171', 'Tax Savings': '$156,965' },
+    submittedAt: new Date().toISOString(),
+    pageUrl: 'https://moxiemortgage.com/rent-vs-buy'
+  }) } };
+  Logger.log(doPost(fake).getContent());
 }
-
-/* =====================================================================
-   RENDER: rail
-   ===================================================================== */
-function animateNum(el,to,fmt){
-  const from=parseFloat(el.dataset.v||'0');
-  el.dataset.v=to;
-  const start=performance.now(), dur=150;
-  const reduce=matchMedia('(prefers-reduced-motion:reduce)').matches;
-  if(reduce){el.textContent=fmt(to);return;}
-  function tick(t){
-    const p=clamp((t-start)/dur,0,1);
-    el.textContent=fmt(from+(to-from)*p);
-    if(p<1)requestAnimationFrame(tick);
-  }
-  requestAnimationFrame(tick);
-}
-function updateRail(){
-  readInputs();
-  const f=railFigures();
-  // desktop rail was replaced by the Financial profile card; only the mobile bar remains
-  const mp=$('mPay'), mr=$('mRent'), mc=$('mCash');
-  if(mp) mp.textContent=money(f.pay);
-  if(mr) mr.textContent=money(f.rent);
-  if(mc) mc.textContent=money(f.cash);
-}
-
-/* =====================================================================
-   STEP NAVIGATION
-   ===================================================================== */
-const NEXT_LABELS=['Next: costs & profile','See my results'];
-function showStep(nStep,dir){
-  step=nStep;
-  document.querySelectorAll('[data-panel]').forEach(p=>{
-    const on=+p.dataset.panel===step;
-    p.hidden=!on;
-    if(on){ p.classList.remove('slide-in-r','slide-in-l'); void p.offsetWidth;
-      p.classList.add(dir==='back'?'slide-in-l':'slide-in-r'); }
-  });
-  // progress
-  document.querySelectorAll('.pstep').forEach(b=>{
-    const idx=+b.dataset.step;
-    b.dataset.state = idx===step?'active':(idx<step?'done':'');
-    b.dataset.clickable = idx<step?'1':'';
-  });
-  $('back').style.visibility = step>0?'visible':'hidden';
-  // step 0 uses the left Next button; step 1 (last input) uses the action box's "See my results"
-  $('next').style.display = step===0 ? '' : 'none';
-  $('next').textContent = NEXT_LABELS[step];
-  toggleSidebar();
-  updatePMIvisibility();
-  scrollFrameTop();
-  postHeight();
-}
-/* Step 1 shows the static promo; steps 2-3 show the live running estimate. */
-function toggleSidebar(){
-  const w=$('work');
-  if(w) w.classList.toggle('is-step1', step===0);
-}
-function scrollFrameTop(){ try{window.scrollTo(0,0);}catch(e){} }
-
-/* Mortgage insurance is handled silently in the model — no UI to toggle. */
-function updatePMIvisibility(){ /* no-op: mortgage insurance is not exposed in the UI */ }
-
-/* =====================================================================
-   RESULTS RENDER
-   ===================================================================== */
-let RES=null;
-function renderAll(){
-  renderVerdict();
-  renderFigures();
-  renderChart();
-  renderEquitySplit();
-  renderBreakdown();
-  renderBars();
-  renderLevers();
-  renderSummary();
-  renderHonesty();
-  renderStrip();
-  renderPrintHeader();
-}
-/* Populate the branded print header's summary + meta line. */
-function renderPrintHeader(){
-  const gap=RES.finalBuyNW-RES.finalRentNW;
-  const sub=$('phSub'), meta=$('phMeta');
-  if(sub){
-    sub.textContent = gap>=0
-      ? `Over ${S.years} years, buying builds about ${money0(gap)} more wealth than renting.`
-      : `A personalized comparison of renting versus buying over ${S.years} years.`;
-  }
-  if(meta){
-    const d=downDollars();
-    const dt=new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
-    const loc = S.taxState || S.zip || '—';
-    meta.textContent = `Home ${money(S.price)} · ${(d/S.price*100).toFixed(0)}% down · ${S.rate}% rate · ${money(S.rent)}/mo rent · ${loc} · Prepared ${dt}`;
-  }
-}
-function runAndShow(){
-  readInputs();
-  // horizon comes from the results slider, default 30
-  S.years = clamp(Math.round(num($('years').value)),1,30);
-  $('yearsN').textContent = S.years;
-  RES=simulate(S);
-  renderAll();
-  $('work').classList.add('hidden');
-  $('mbar').style.display='none';
-  $('results').classList.remove('hidden');
-  // mark step 3 (results) active, inputs done
-  document.querySelectorAll('.pstep').forEach(b=>{
-    const idx=+b.dataset.step;
-    b.dataset.state = idx===2?'active':'done';
-    b.dataset.clickable='1';
-  });
-  scrollFrameTop();
-  postHeight();
-}
-/* 2-second calculating animation, then reveal results */
-function runWithAnimation(){
-  const ov=$('calcOverlay');
-  ov.classList.add('show');
-  scrollFrameTop(); postHeight();
-  window.setTimeout(()=>{
-    runAndShow();
-    ov.classList.remove('show');
-    postHeight();
-  }, 2000);
-}
-
-function beYear(){ return RES.breakevenMonth<0?null:Math.ceil(RES.breakevenMonth/12); }
-
-function renderVerdict(){
-  const big=$('verdictBig'), ctx=$('verdictCtx');
-  const gap=RES.finalBuyNW-RES.finalRentNW;   // buyer net worth minus renter
-  const by=beYear();
-  if(gap>=0){
-    big.className='big';
-    big.innerHTML=`Buying builds <span class="yr">${money(Math.abs(gap))}</span> more wealth over ${S.years} year${S.years===1?'':'s'}.`;
-    if(by && by>1){
-      ctx.textContent='Renting may be cheaper month to month at first, but every mortgage payment builds equity you keep. By year '+by+' the equity and tax savings from owning put you ahead — and the gap widens the longer you stay.';
-    }else{
-      ctx.textContent='Every mortgage payment builds equity you keep, and the tax savings from owning add up. Renting spends money you never see again, so buying pulls ahead and keeps widening the gap.';
-    }
-  }else{
-    big.className='big rent';
-    big.innerHTML=`Over ${S.years} year${S.years===1?'':'s'}, renting keeps you <span class="yr">${money(Math.abs(gap))}</span> ahead.`;
-    ctx.textContent='At this short a horizon, the up-front costs of buying (closing costs, and early payments that are mostly interest) outweigh the equity you\u2019d build. Drag the time horizon higher to see when buying takes the lead — owning almost always wins given enough time.';
-  }
-}
-
-function renderFigures(){
-  const gap=RES.finalBuyNW-RES.finalRentNW;
-  const gapEl=$('figGap');
-  gapEl.textContent=money0(gap);
-  gapEl.style.color = gap>=0?'var(--coral)':'var(--moxie-blue)';
-  // equity built (home value minus loan balance) at the horizon
-  $('figEquity').textContent=money(RES.finalEquity);
-  $('figEquity').style.color='var(--coral)';
-  // cumulative tax savings from owning — a benefit renters never get
-  $('figTax').textContent=money(RES.taxSavingsTotal);
-  $('figTax').style.color='var(--positive)';
-}
-
-/* ---- equity source split: down payment + appreciation + principal ---- */
-function renderEquitySplit(){
-  const parts=[
-    ['Down payment', RES.equityFromDown, 'var(--text)'],
-    ['Appreciation', RES.equityFromAppreciation, 'var(--brand-cyan)'],
-    ['Principal paid', RES.equityFromPrincipal, 'var(--coral)']
-  ].filter(p=>p[1]>0.5);
-  const total=parts.reduce((s,p)=>s+p[1],0)||1;
-  $('eqTotal').textContent=money(RES.finalEquity);
-  $('eqBar').innerHTML=parts.map(([label,val,color])=>{
-    const pct=(val/total)*100;
-    const showLabel = pct>=12;
-    return `<span style="width:${pct}%;background:${color}" title="${label}: ${money(val)}">${showLabel?Math.round(pct)+'%':''}</span>`;
-  }).join('');
-  $('eqKey').innerHTML=parts.map(([label,val,color])=>
-    `<span><i style="background:${color}"></i>${label} <b>${money(val)}</b></span>`
-  ).join('');
-}
-
-/* ---- signature chart ---- */
-function renderChart(){
-  const yrs=RES.years;
-  const W=760, H=300, padR=20, padT=16, padB=34;
-  const pts=[{y:0,buy:RES.monthly.buyWealth[0],rent:RES.monthly.rentWealth[0]}]
-    .concat(yrs.map(r=>({y:r.year,buy:r.buyWealth,rent:r.rentWealth})));
-  const maxY=S.years;
-  let maxV=-Infinity,minV=Infinity;
-  pts.forEach(p=>{maxV=Math.max(maxV,p.buy,p.rent);minV=Math.min(minV,p.buy,p.rent);});
-  minV=Math.min(minV,0);
-
-  // "nice numbers" for round y-axis labels
-  function niceNum(range, round){
-    const exp=Math.floor(Math.log10(range));
-    const frac=range/Math.pow(10,exp);
-    let nf;
-    if(round){ nf = frac<1.5?1 : frac<3?2 : frac<7?5 : 10; }
-    else{ nf = frac<=1?1 : frac<=2?2 : frac<=5?5 : 10; }
-    return nf*Math.pow(10,exp);
-  }
-  const ticks=4;
-  const rawRange=Math.max(maxV-minV, 1);
-  const niceRange=niceNum(rawRange, false);
-  const step=niceNum(niceRange/ticks, true);
-  const niceMin=Math.floor(minV/step)*step;
-  const niceMax=Math.ceil(maxV/step)*step;
-  minV=niceMin; maxV=niceMax;
-
-  // widest y-axis label sets the left padding so 7+ digit values (e.g. $1,500,000) aren't clipped
-  let widestLabel=0;
-  for(let v=niceMin; v<=niceMax+0.5; v+=step){ widestLabel=Math.max(widestLabel, money(v).length); }
-  const padL = Math.max(64, widestLabel*7 + 16);   // ~7px per char at 11px font, +gap
-  const iw=W-padL-padR, ih=H-padT-padB;
-
-  const X=y=>padL+(y/maxY)*iw;
-  const Y=v=>padT+ih-((v-minV)/(maxV-minV))*ih;
-  const path=key=>pts.map((p,k)=>(k?'L':'M')+X(p.y).toFixed(1)+' '+Y(p[key]).toFixed(1)).join(' ');
-  const buyPath=path('buy'), rentPath=path('rent');
-
-  // y gridlines at round-number steps
-  let grid='';
-  for(let v=niceMin; v<=niceMax+0.5; v+=step){
-    const yy=Y(v);
-    grid+=`<line x1="${padL}" y1="${yy}" x2="${W-padR}" y2="${yy}" stroke="var(--hairline)" stroke-width="1"/>`;
-    grid+=`<text x="${padL-10}" y="${yy+4}" text-anchor="end" fill="var(--text-muted)" font-size="11" font-variant-numeric="tabular-nums">${money(v)}</text>`;
-  }
-  // x labels
-  let xlab=''; const xt=Math.min(maxY,6); const stepY=Math.max(1,Math.round(maxY/xt));
-  for(let y=0;y<=maxY;y+=stepY){
-    xlab+=`<text x="${X(y)}" y="${H-12}" text-anchor="middle" fill="var(--text-muted)" font-size="11">Yr ${y}</text>`;
-  }
-  // area fill under the buy line to emphasize the equity being built
-  const areaPath = buyPath + ` L ${X(maxY).toFixed(1)} ${Y(minV).toFixed(1)} L ${X(0).toFixed(1)} ${Y(minV).toFixed(1)} Z`;
-  const buyLen=lineLen(pts.map(p=>[X(p.y),Y(p.buy)]));
-  const rentLen=lineLen(pts.map(p=>[X(p.y),Y(p.rent)]));
-
-  $('chart').innerHTML=`
-  <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Wealth built over time: home equity from buying versus renting, which builds none.">
-    <defs><linearGradient id="buyFill" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="var(--coral)" stop-opacity="0.16"/>
-      <stop offset="100%" stop-color="var(--coral)" stop-opacity="0"/>
-    </linearGradient></defs>
-    ${grid}
-    <path d="${areaPath}" fill="url(#buyFill)" stroke="none"/>
-    <path class="drawline" d="${rentPath}" fill="none" stroke="var(--moxie-blue)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="--len:${rentLen}"/>
-    <path class="drawline" d="${buyPath}" fill="none" stroke="var(--coral)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="--len:${buyLen}"/>
-    ${xlab}
-    <g id="scrubG" style="display:none">
-      <line id="scrubLine" y1="${padT}" y2="${padT+ih}" stroke="var(--text-muted)" stroke-width="1"/>
-      <circle id="scrubB" r="4" fill="var(--coral)" stroke="var(--ink)" stroke-width="2"/>
-      <circle id="scrubR" r="4" fill="var(--moxie-blue)" stroke="var(--ink)" stroke-width="2"/>
-    </g>
-    <rect id="scrubHit" x="${padL}" y="${padT}" width="${iw}" height="${ih}" fill="transparent"/>
-  </svg>`;
-
-  // scrubber
-  const svg=$('chart').querySelector('svg');
-  const hit=$('chart').querySelector('#scrubHit');
-  const g=$('chart').querySelector('#scrubG');
-  const sl=$('chart').querySelector('#scrubLine');
-  const sB=$('chart').querySelector('#scrubB');
-  const sR=$('chart').querySelector('#scrubR');
-  function moveScrub(clientX){
-    const rect=svg.getBoundingClientRect();
-    const sx=(clientX-rect.left)*(W/rect.width);
-    const y=clamp((sx-padL)/iw*maxY,0,maxY);
-    const bv=interpAt(pts,'buy',y), rv=interpAt(pts,'rent',y);
-    g.style.display='';
-    sl.setAttribute('x1',X(y));sl.setAttribute('x2',X(y));
-    sB.setAttribute('cx',X(y));sB.setAttribute('cy',Y(bv));
-    sR.setAttribute('cx',X(y));sR.setAttribute('cy',Y(rv));
-    $('scrubYr').textContent='Year '+Math.round(y);
-    $('scrubBuy').textContent='Equity '+money(bv);
-    $('scrubRent').textContent='Renting '+money(rv);
-  }
-  hit.addEventListener('mousemove',e=>moveScrub(e.clientX));
-  hit.addEventListener('mouseleave',()=>{g.style.display='none';setScrubEnd();});
-  hit.addEventListener('touchmove',e=>{if(e.touches[0])moveScrub(e.touches[0].clientX);},{passive:true});
-  hit.addEventListener('touchstart',e=>{if(e.touches[0])moveScrub(e.touches[0].clientX);},{passive:true});
-  function setScrubEnd(){
-    const last=pts[pts.length-1];
-    $('scrubYr').textContent='Year '+S.years;
-    $('scrubBuy').textContent='Equity '+money(last.buy);
-    $('scrubRent').textContent='Renting '+money(last.rent);
-  }
-  setScrubEnd();
-}
-function interpAt(pts,key,y){
-  for(let k=1;k<pts.length;k++){
-    if(y<=pts[k].y){
-      const a=pts[k-1],b=pts[k];const t=(y-a.y)/((b.y-a.y)||1);
-      return a[key]+(b[key]-a[key])*t;
-    }
-  }
-  return pts[pts.length-1][key];
-}
-function lineLen(coords){let L=0;for(let k=1;k<coords.length;k++){const dx=coords[k][0]-coords[k-1][0],dy=coords[k][1]-coords[k-1][1];L+=Math.hypot(dx,dy);}return Math.ceil(L)+2;}
-
-/* ---- stacked bars ---- */
-/* ---- Rocket-style cost breakdown with monthly/annual/total tabs ---- */
-let BD_PERIOD='monthly';
-function renderBreakdown(){
-  const t=RES.costTable[BD_PERIOD];
-  const buy=t.buy, rent=t.rent, diff=buy-rent;
-  const cheaper = diff<0 ? 'Buying' : 'Renting';
-  $('bdRows').innerHTML=`
-    <div class="rc lbl"><i style="background:var(--moxie-blue)"></i>Rent</div><div class="rc rent">${money(rent)}</div>
-    <div class="rc lbl"><i style="background:var(--coral)"></i>Buy</div><div class="rc buy">${money(buy)}</div>
-    <div class="rc lbl diff-lbl">Difference</div><div class="rc diffval">${cheaper} costs ${money(Math.abs(diff))} less</div>`;
-  const label = BD_PERIOD==='monthly'?'per month, averaged over year one'
-    : BD_PERIOD==='annual'?'for year one, including closing costs (and a rent deposit)'
-    : `over your ${S.years} years, including closing costs`;
-  $('bdNote').textContent = `Figures are ${label}. This is true cost only — interest, taxes, insurance, upkeep, and closing. It excludes both your down payment and the principal portion of your payment, because that money isn't spent — it builds equity you keep. It's a fair, apples-to-apples comparison against rent.`;
-}
-document.querySelectorAll('.bdtab').forEach(b=>{
-  b.addEventListener('click',()=>{
-    document.querySelectorAll('.bdtab').forEach(x=>x.setAttribute('aria-pressed','false'));
-    b.setAttribute('aria-pressed','true');
-    BD_PERIOD=b.dataset.period;
-    renderBreakdown(); postHeight();
-  });
-});
-
-function renderBars(){
-  // Use year-one figures divided by 12 → "today's" monthly costs, matching the
-  // cost-breakdown tab and what the user recognizes now (not a 30-year average).
-  const b=spendBreakdown({...S, years:1});
-  const mo=12;
-  const M=v=>money(Math.round(v/mo));   // per month, year one
-
-  // buying: true costs (itemized) + principal (kept). Buying = cyan family.
-  const costItems=[
-    ['Interest', b.pi, 'var(--brand-cyan)'],
-    ['Property tax', b.tax, '#1E93AC'],
-    ['Maintenance', b.maint, '#57C6DC'],
-    ['Homeowners insurance', b.ins, '#9BDCE8'],
-    ['Mortgage insurance', b.pmi, '#146B7E'],
-    ['HOA dues', b.hoa, '#BDE9F1']
-  ].filter(r=>r[1]>0.5);
-  const buyCost = costItems.reduce((s,r)=>s+r[1],0);
-  const principal = b.principal;
-
-  // renting: all cost. Renting = coral family.
-  const rentItems=[
-    ['Rent', b.rent, 'var(--coral)'],
-    ['Renters insurance', b.rentIns, '#FBB49F']
-  ].filter(r=>r[1]>0.5);
-  const rentCost = rentItems.reduce((s,r)=>s+r[1],0);
-
-  const row=(label,val,color,kept)=>`
-    <div class="mg-row${kept?' kept':''}">
-      <span class="mg-dot" style="background:${color}"></span>
-      <span class="mg-label">${label}</span>
-      <span class="mg-val">${M(val)}<small>/mo</small></span>
-    </div>`;
-
-  const buyHTML=`
-    <div class="mg-col">
-      <div class="mg-head buy">Buying</div>
-      ${costItems.map(([l,v,c])=>row(l,v,c)).join('')}
-      <div class="mg-subtotal">
-        <span class="mg-label">True cost</span>
-        <span class="mg-val">${M(buyCost)}<small>/mo</small></span>
-      </div>
-      ${principal>0.5?`<div class="mg-row kept">
-        <span class="mg-dot" style="background:var(--positive)"></span>
-        <span class="mg-label">Principal <em>→ your equity</em></span>
-        <span class="mg-val pos">+${M(principal)}<small>/mo</small></span>
-      </div>`:''}
-    </div>`;
-
-  const rentHTML=`
-    <div class="mg-col mg-col-rent">
-      <div class="mg-head rent">Renting</div>
-      ${rentItems.map(([l,v,c])=>row(l,v,c)).join('')}
-      <div class="mg-subtotal">
-        <span class="mg-label">True cost</span>
-        <span class="mg-val">${M(rentCost)}<small>/mo</small></span>
-      </div>
-      <div class="mg-row kept muted">
-        <span class="mg-dot" style="background:var(--hairline)"></span>
-        <span class="mg-label">Equity earned</span>
-        <span class="mg-val">$0<small>/mo</small></span>
-      </div>
-      <div class="mg-edit-wrap">
-        <button type="button" class="btn ghost btn-sm" data-edit-inputs>Edit your inputs</button>
-      </div>
-    </div>`;
-
-  const principalMo=Math.round(principal/mo);
-  const piggy=`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v6"/><path d="M9 8h6"/><path d="M4 13a8 8 0 1 1 16 0v5a1 1 0 0 1-1 1h-2l-1 2h-3l-1-2H5a1 1 0 0 1-1-1v-5z"/></svg>`;
-  // hand-drawn arrow that sweeps from the principal row (upper-left) down into the callout
-  const arrow=`<svg class="mg-arrow" viewBox="0 0 120 90" fill="none" aria-hidden="true">
-    <path d="M18 8 C 8 34, 14 58, 44 70" stroke="var(--positive)" stroke-width="3" stroke-linecap="round" fill="none"
-      stroke-dasharray="0.1 9" style="stroke-dasharray:none"/>
-    <path d="M34 56 L 45 71 L 28 72" stroke="var(--positive)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  </svg>`;
-
-  const callout=`
-    <div class="mg-piggy">
-      ${arrow}
-      <div class="mg-piggy-icon">${piggy}</div>
-      <div class="mg-piggy-text">
-        <div class="mg-piggy-title">That green principal is your forced piggy bank</div>
-        <p>Every month, <b>${money(principalMo)}</b> of your mortgage payment isn't spent — it's swept straight into your home equity, whether you think about it or not. A renter puts away <b>$0</b>. It's the automatic savings that quietly makes owning pay off.</p>
-      </div>
-    </div>`;
-
-  $('moneygo').innerHTML = `<div class="mg-grid">${buyHTML}${rentHTML}</div>${principal>0.5?callout:''}`;
-}
-
-/* ---- table ---- */
-/* ---- what would change ---- */
-function renderLevers(){
-  const out=[];
-  const horizon=S.years;
-
-  // 1. bigger down payment (to 20% if below, else +10pts)
-  const curPct = downDollars()/Math.max(1,S.price)*100;
-  const altPct = curPct<20?20:Math.min(100,curPct+10);
-  const r1=simulate({...S,downMode:'pct',down:altPct});
-  const g0=RES.finalBuyNW-RES.finalRentNW, g1=r1.finalBuyNW-r1.finalRentNW;
-  out.push(['Bigger down payment', `At <b>${altPct.toFixed(0)}% down</b> instead of ${curPct.toFixed(0)}%, buying's advantage ${g1>=g0?'grows to':'changes to'} <b>${money(Math.abs(g1))}</b> (less interest and no mortgage insurance).`]);
-
-  // 2. rate -1%
-  const lowerRate=Math.max(0,S.rate-1);
-  const r2=simulate({...S,rate:lowerRate});
-  const g2=r2.finalBuyNW-r2.finalRentNW;
-  out.push(['At a lower rate', `<b>${lowerRate.toFixed(2)}%</b> instead of ${S.rate}%, buying's advantage grows to <b>${money(Math.abs(g2))}</b> over ${horizon} years.`]);
-
-  // 3. rents rise faster (+2)
-  const fasterRent=RENT_INCREASE+2;
-  const r3=simulate({...S,rentInc:fasterRent});
-  const g3=r3.finalBuyNW-r3.finalRentNW;
-  out.push(['If rents rise faster', `At <b>${fasterRent.toFixed(1)}%</b> a year, renting costs more and buying's advantage grows to <b>${money(Math.abs(g3))}</b>.`]);
-
-  $('levers').innerHTML=out.map(([k,v])=>`<div class="lever"><span class="k">${k}</span><span>${v}</span></div>`).join('');
-}
-
-/* ---- section 5: the bottom line ---- */
-function renderSummary(){
-  const gap=RES.finalBuyNW-RES.finalRentNW;
-  const equity=RES.finalEquity;
-  const tax=RES.taxSavingsTotal;
-  const yrs=S.years;
-  // today's monthly true costs (year one) for the "initially cheaper" point
-  const b1=spendBreakdown({...S, years:1});
-  const buyTrueMo=Math.round((b1.pi+b1.tax+b1.maint+b1.ins+b1.pmi+b1.hoa)/12);
-  const rentMo=Math.round((b1.rent+b1.rentIns)/12);
-  const principalMo=Math.round(b1.principal/12);
-  const rentCheaper = rentMo < buyTrueMo;
-
-  // professional line icons (stroked, brand-colored) instead of emoji
-  const ICON={
-    balance:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"/><path d="M5 7h14"/><path d="M5 7l-2.5 5a2.5 2.5 0 0 0 5 0L5 7z"/><path d="M19 7l-2.5 5a2.5 2.5 0 0 0 5 0L19 7z"/><path d="M8 21h8"/></svg>`,
-    piggy:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v6"/><path d="M9 8h6"/><path d="M4 13a8 8 0 1 1 16 0v5a1 1 0 0 1-1 1h-2l-1 2h-3l-1-2H5a1 1 0 0 1-1-1v-5z"/></svg>`,
-    receipt:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2V3z"/><path d="M9 8h6"/><path d="M9 12h6"/><path d="M9 16h3"/></svg>`,
-    growth:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M7 15l4-4 3 3 5-6"/><path d="M19 8h-3.5M19 8v3.5"/></svg>`
-  };
-
-  const cards=[
-    [ICON.balance,'blue','Renting can look cheaper — at first',
-      rentCheaper
-        ? `Today, renting runs about <b>${money(rentMo)}/mo</b> versus <b>${money(buyTrueMo)}/mo</b> in true costs to own. That gap is why renting feels easier month one. But rent climbs every year, while your mortgage payment stays fixed — so the "savings" shrink and then reverse.`
-        : `Even month one, owning is competitive here. And because rent climbs every year while your mortgage payment stays fixed, the longer you look, the more owning pulls ahead.`],
-    [ICON.piggy,'green','Part of your payment isn\u2019t spent — it\u2019s saved',
-      `About <b>${money(principalMo)}/mo</b> of your payment is principal. That\u2019s not money lost — it\u2019s a forced piggy bank that moves straight into your equity. A renter sets aside <b>$0</b>. Over ${yrs} years that builds <b>${money(equity)}</b> of home equity you own outright.`],
-    [ICON.receipt,'green','Owning comes with a tax break renting doesn\u2019t',
-      `Deducting mortgage interest and property tax saves you an estimated <b>${money(tax)}</b> over ${yrs} years — a benefit renters simply can\u2019t claim.`],
-    [ICON.growth,'coral','The true cost over time is the whole story',
-      gap>=0
-        ? `Add it up and buying builds about <b>${money(gap)}</b> more wealth than renting over ${yrs} years. Renting\u2019s low monthly cost is real early on, but the long-run cost of building none of this equity is massive.`
-        : `Over ${yrs} years renting stays ahead by about <b>${money(Math.abs(gap))}</b> — the up-front costs of buying haven\u2019t been outrun yet. Drag the time horizon higher to see when owning takes the lead.`]
-  ];
-
-  $('summary').innerHTML = cards.map(([icon,tone,title,body])=>`
-    <div class="sum-card">
-      <div class="sum-icon ${tone}">${icon}</div>
-      <div class="sum-text"><div class="sum-title">${title}</div><p>${body}</p></div>
-    </div>`).join('');
-}
-
-/* ---- honesty note ---- */
-function renderHonesty(){
-  const d=downDollars();
-  const pct=(d/S.price*100);
-  $('honBody').innerHTML=`
-  <p>This estimate runs a month-by-month simulation over ${S.years} years and compares the net worth you'd build buying versus renting. Your down payment is treated as equity you keep, not a cost. It doesn't model investing the difference or other opportunity costs.</p>
-  <ul>
-    <li>Home price ${money(S.price)}, ${pct.toFixed(1)}% down (${money(d)}) at a ${S.rate}% interest rate.</li>
-    <li><b>A 30-year fixed loan term is assumed.</b></li>
-    <li><b>Home appreciation is assumed at ${APPRECIATION}% a year</b> — near the long-run U.S. average.</li>
-    <li><b>Rent is assumed to rise ${RENT_INCREASE}% a year</b>, starting from ${money(S.rent)}/mo.</li>
-    <li><b>Maintenance and repairs are assumed at ${MAINT_PCT}% of the home's value a year.</b></li>
-    <li><b>Property tax is estimated from your ZIP or state${S.taxState?(' ('+S.taxState+')'):''}</b> at ${S.tax.toFixed(2)}% of value per year${S.taxResolved?'':' (national average, since we couldn\u2019t match your ZIP)'} — a state-average effective rate, not your parcel's exact bill. Insurance ${money(S.ins)}/yr and HOA ${money(S.hoa)}/mo, both inflating ${(ANNUAL_INFLATE*100)}% a year.</li>
-    <li><b>Closing costs are assumed at ${CLOSING_PCT}% of the purchase price</b>, added to the buyer's up-front cash.</li>
-    <li><b>Mortgage insurance</b> ${RES.pmiOn?('applies at '+MI_RATE+'% of the loan per year until you reach 20% equity, based on your '+pct.toFixed(1)+'% down payment.'):'does not apply — you put at least 20% down.'}</li>
-    <li><b>Tax benefit assumes you itemize deductions.</b> Your ${money(S.income)} income maps to a ${S.marg}% marginal rate. We value the deduction of mortgage interest plus property tax (capped at the ${money(SALT_CAP)} SALT limit) at that rate — a benefit renting doesn't offer. Consult a tax professional for your specific situation.</li>
-  </ul>
-  <p class="note">This is an estimate, not a loan offer. The tax figures assume itemized deductions and a single-filer bracket, and don't reflect the specifics of your situation. Talk to a licensed Moxie loan officer, and a tax professional, for numbers based on your actual finances.</p>`;
-}
-
-/* ---- editable input strip ---- */
-function renderStrip(){
-  const d=downDollars();
-  const chips=[
-    ['Price',money(S.price),'price',0],
-    ['Down',(S.downMode==='pct'?S.down+'%':money(S.down)),'down',0],
-    ['Rate',S.rate+'%','rate',0],
-    ['Rent',money(S.rent),'rent',0],
-    ['ZIP',(S.taxState||S.zip||'—'),'zip',0],
-    ['Income',money(S.income),'income',1],
-  ];
-  const strip=$('inputStrip');
-  strip.querySelectorAll('.chip').forEach(c=>c.remove());
-  chips.forEach(([l,v,id,st])=>{
-    const c=document.createElement('button');
-    c.className='chip';
-    c.innerHTML=`${l} <b>${v}</b>`;
-    c.addEventListener('click',()=>{ backToForm(st); if(id){ setTimeout(()=>{const el=$(id);if(el){el.focus();el.select&&el.select();}},60); } });
-    strip.appendChild(c);
-  });
-}
-
-/* =====================================================================
-   FORM <-> RESULTS
-   ===================================================================== */
-function backToForm(toStep){
-  $('results').classList.add('hidden');
-  $('work').classList.remove('hidden');
-  if(window.innerWidth<=900)$('mbar').style.display='block';
-  showStep(toStep!=null?Math.min(toStep,1):1,'back');
-}
-
-/* =====================================================================
-   INPUT WIRING
-   ===================================================================== */
-function fmtMoneyField(el){
-  const n=num(el.value);
-  el.value = n?commafy(n):'0';
-}
-document.querySelectorAll('input[data-money]').forEach(el=>{
-  el.addEventListener('blur',()=>{fmtMoneyField(el);updateRail();});
-});
-// generic live update
-$('work').addEventListener('input',e=>{
-  if(e.target.matches('input')){ updateRail(); updatePMIvisibility(); }
-  if(e.target.id==='zip'){ updateZipHelper(); if(isValidZipOrState($('zip').value)) showZipError(false); }
-  if(e.target.id==='credit'){ updateCreditHelper(); }
-});
-
-/* Qualitative credit-score tier as live feedback. */
-function updateCreditHelper(){
-  const help=$('creditHelp');
-  if(!help) return;
-  const s=clamp(Math.round(num($('credit').value)),300,850);
-  let tier;
-  if(s>=800) tier='Exceptional — you\u2019ll see lenders\u2019 best rates.';
-  else if(s>=740) tier='Very good — strong rates available.';
-  else if(s>=670) tier='Good — competitive rates.';
-  else if(s>=580) tier='Fair — expect a higher rate.';
-  else tier='Poor — options may be limited.';
-  help.textContent=tier;
-}
-
-/* Show which state / tax rate the entered ZIP resolves to, as live feedback. */
-function updateZipHelper(){
-  const help=$('zipHelp');
-  if(!help) return;
-  const v=$('zip').value.trim();
-  if(!v){ help.textContent='Sets your estimated property tax rate.'; return; }
-  const pt=propTaxFromZip(v);
-  if(pt.resolved){
-    help.textContent=`Estimated property tax for ${pt.state}: ${pt.rate.toFixed(2)}% of value per year.`;
-  }else{
-    help.textContent='Sets your estimated property tax rate.';
-  }
-}
-
-// down payment toggle
-$('dpPct').addEventListener('click',()=>setDpMode('pct'));
-$('dpDol').addEventListener('click',()=>setDpMode('dol'));
-function setDpMode(mode){
-  readInputs();
-  const cur=downDollars();
-  S.downMode=mode;
-  $('dpPct').setAttribute('aria-pressed',mode==='pct');
-  $('dpDol').setAttribute('aria-pressed',mode==='dol');
-  const dwn=$('down');
-  if(mode==='pct'){ $('dpSuf').textContent='%'; dwn.value=(cur/S.price*100).toFixed(1).replace(/\.0$/,''); }
-  else{ $('dpSuf').textContent='$'; dwn.value=commafy(cur); }
-  updateRail(); updatePMIvisibility();
-}
-
-// loan term is fixed at 30 years (see S.term default and assumptions note)
-
-// years slider (on results page) <-> live re-render of results
-const yr=$('years'), yrN=$('yearsN');
-function setHorizonFill(){
-  const min=+yr.min||1, max=+yr.max||30, v=+yr.value;
-  const pct=((v-min)/(max-min))*100;
-  yr.style.setProperty('--fill', pct+'%');
-}
-function onYearsChange(){
-  const v=clamp(Math.round(num(yr.value)),1,30);
-  yr.value=v; yrN.textContent=v;
-  setHorizonFill();
-  S.years=v;
-  if(RES){ RES=simulate(S); renderAll(); postHeight(); }
-}
-yr.addEventListener('input',onYearsChange);
-setHorizonFill();
-
-// nav buttons
-$('next').addEventListener('click',()=>{
-  if(!validateStep(step)) return;
-  if(step<1) showStep(step+1,'fwd'); else runWithAnimation();
-});
-// step 2 "See my results" lives in the action box under Financial profile
-$('resultsBtn').addEventListener('click',()=>{ if(!validateStep(1)) return; runWithAnimation(); });
-$('back').addEventListener('click',()=>{ if(step>0) showStep(step-1,'back'); });
-// "Edit your inputs" lives in the (re-rendered) renting column, so delegate the click
-document.addEventListener('click',e=>{
-  if(e.target.closest('[data-edit-inputs]')) backToForm(0);
-});
-
-/* Required-field validation per step. Returns true if the step is complete. */
-const REQUIRED = {
-  0: [
-    {id:'price', min:1},
-    {id:'down',  min:0},        // 0% down is allowed
-    {id:'rate',  min:0.01},
-    {id:'rent',  min:1},
-    {id:'zip',   zip:true}
-  ],
-  1: [
-    {id:'ins',    min:0},
-    {id:'hoa',    min:0},       // 0 HOA is valid
-    {id:'income', min:1},
-    {id:'credit', min:300, max:850},
-    {id:'rentIns',min:0}
-  ]
-};
-function markField(id, bad){
-  const el=$(id); if(!el) return;
-  const well=el.closest('.inwell');
-  if(well) well.classList.toggle('invalid', !!bad);
-}
-function validateStep(s){
-  const rules=REQUIRED[s]||[];
-  let firstBad=null;
-  rules.forEach(r=>{
-    const el=$(r.id); if(!el) return;
-    const raw=el.value.trim();
-    let bad=false;
-    if(r.zip){ bad=!isValidZipOrState(raw); }
-    else{
-      if(raw===''){ bad=true; }
-      else{
-        const v=num(raw);
-        if(r.min!=null && v<r.min) bad=true;
-        if(r.max!=null && v>r.max) bad=true;
-      }
-    }
-    markField(r.id, bad);
-    if(r.id==='zip') showZipError(bad);
-    if(bad && !firstBad) firstBad=el;
-  });
-  if(firstBad){ firstBad.focus(); firstBad.select && firstBad.select(); }
-  return !firstBad;
-}
-// clear a field's invalid state as soon as it becomes valid while typing
-$('work').addEventListener('input',e=>{
-  const id=e.target.id;
-  const rule=[...(REQUIRED[0]||[]),...(REQUIRED[1]||[])].find(r=>r.id===id);
-  if(rule){
-    const raw=e.target.value.trim();
-    let ok = rule.zip ? isValidZipOrState(raw)
-      : raw!=='' && num(raw)>=(rule.min??-Infinity) && num(raw)<=(rule.max??Infinity);
-    if(ok) markField(id,false);
-  }
-});
-
-function showZipError(on){
-  $('zipErr').classList.toggle('show', !!on);
-  $('zipWell').classList.toggle('invalid', !!on);
-}
-
-// progress clickable
-document.querySelectorAll('.pstep').forEach(b=>{
-  b.addEventListener('click',()=>{
-    const idx=+b.dataset.step;
-    if(!$('results').classList.contains('hidden')){
-      if(idx>=2) return;         // already on results; ignore
-      backToForm(idx); return;
-    }
-    if(idx<=step || b.dataset.clickable==='1') showStep(idx, idx<step?'back':'fwd');
-  });
-});
-
-// show all table
-
-
-// email results
-/* =====================================================================
-   LEAD CAPTURE MODAL  →  Lofty CRM
-   ===================================================================== */
-const leadModal=$('leadModal');
-function openLeadModal(){
-  // reset to form view
-  $('leadFormWrap').hidden=false;
-  $('leadSuccess').hidden=true;
-  $('leadErr').classList.remove('show'); $('leadErr').textContent='';
-  ['leadName','leadEmail','leadPhone'].forEach(id=>$(id).classList.remove('invalid'));
-  const btn=$('leadSubmit'); btn.disabled=false; btn.textContent='Send my results';
-  leadModal.classList.add('show'); leadModal.setAttribute('aria-hidden','false');
-  postHeight();
-  setTimeout(()=>$('leadName').focus(),50);
-}
-function closeLeadModal(){
-  leadModal.classList.remove('show'); leadModal.setAttribute('aria-hidden','true');
-}
-$('emailBtn').addEventListener('click', openLeadModal);
-$('leadClose').addEventListener('click', closeLeadModal);
-$('leadDone').addEventListener('click', closeLeadModal);
-leadModal.addEventListener('click', e=>{ if(e.target===leadModal) closeLeadModal(); });
-document.addEventListener('keydown', e=>{ if(e.key==='Escape' && leadModal.classList.contains('show')) closeLeadModal(); });
-
-function validEmail(v){ return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim()); }
-function validPhone(v){ return v.replace(/\D/g,'').length>=10; }
-
-$('leadSubmit').addEventListener('click', async ()=>{
-  const name=$('leadName').value.trim();
-  const email=$('leadEmail').value.trim();
-  const phone=$('leadPhone').value.trim();
-  const err=$('leadErr');
-
-  // validate
-  let bad=null;
-  $('leadName').classList.toggle('invalid', !name);
-  $('leadEmail').classList.toggle('invalid', !validEmail(email));
-  $('leadPhone').classList.toggle('invalid', !validPhone(phone));
-  if(!name) bad='Please enter your name.';
-  else if(!validEmail(email)) bad='Please enter a valid email address.';
-  else if(!validPhone(phone)) bad='Please enter a valid phone number.';
-  if(bad){ err.textContent=bad; err.classList.add('show'); return; }
-  err.classList.remove('show');
-
-  const btn=$('leadSubmit'); btn.disabled=true; btn.textContent='Sending…';
-
-  // assemble the lead payload from the form + the current results
-  const lead = {
-    name, email, phone,
-    source:'MoxieMortgage.com',
-    tag:'Rent v Buy Calculator',
-    inputs:{
-      homePrice:S.price,
-      downPayment: S.downMode==='pct' ? (S.down+'%') : ('$'+S.down),
-      rate:S.rate+'%',
-      currentRent:S.rent,
-      zipOrState:S.taxState||S.zip||'',
-      income:S.income,
-      creditScore:S.credit
-    },
-    results:{
-      horizonYears:S.years,
-      netWorthAdvantage: Math.round(RES.finalBuyNW-RES.finalRentNW),
-      homeEquity: Math.round(RES.finalEquity),
-      taxSavings: Math.round(RES.taxSavingsTotal)
-    },
-    submittedAt: new Date().toISOString()
-  };
-
-  try{
-    await createLoftyLead(lead);
-    $('leadFormWrap').hidden=true;
-    $('leadSuccess').hidden=false;
-    $('leadSuccessMsg').textContent=`Thanks, ${name.split(' ')[0]||name} — your results are on the way. A Moxie loan officer will follow up shortly.`;
-    postHeight();
-  }catch(ex){
-    btn.disabled=false; btn.textContent='Send my results';
-    err.textContent='Something went wrong sending your info. Please try again.';
-    err.classList.add('show');
-    console.error('Lofty lead error:', ex);
-  }
-});
-
-/* ---------------------------------------------------------------------
-   Lofty CRM integration point.
-   Replace the body of this function with the real API call. Because this
-   calculator is embedded (GitHub Pages / iframe) and Lofty's API needs a
-   secret key, the call should go to a small serverless proxy / Apps Script
-   Web App URL that holds the credentials and forwards to Lofty — never put
-   the Lofty API key in this client file.
-
-   Expected shape once you provide the details:
-     const LEAD_ENDPOINT = 'https://script.google.com/macros/s/XXXX/exec';
-     const res = await fetch(LEAD_ENDPOINT, {
-       method:'POST',
-       headers:{'Content-Type':'application/json'},
-       body: JSON.stringify(lead)
-     });
-     if(!res.ok) throw new Error('Lead endpoint '+res.status);
-     return res.json();
---------------------------------------------------------------------- */
-const LEAD_ENDPOINT = 'https://script.google.com/macros/s/AKfycbwrRcTDucKmF93SnLp4zblDjVWMRZn6Uypsyytjgk1WEiFCRrMpEewXlXdJTQV9SPhQzA/exec';
-async function createLoftyLead(lead){
-  if(!LEAD_ENDPOINT){
-    console.log('[Lofty lead — endpoint not set] Payload:', lead);
-    await new Promise(r=>setTimeout(r,700));
-    return { ok:true, simulated:true };
-  }
-  // Google Apps Script Web Apps don't send CORS headers for cross-origin JSON reads,
-  // and a JSON content-type triggers a preflight Apps Script can't answer. So we send
-  // a "simple" request: text/plain body (no preflight), mode:'no-cors' (fire-and-forget).
-  // The POST reaches Apps Script and creates the lead; the response is opaque by design.
-  // In Apps Script, read the body with: JSON.parse(e.postData.contents)
-  await fetch(LEAD_ENDPOINT, {
-    method:'POST',
-    mode:'no-cors',
-    headers:{'Content-Type':'text/plain;charset=utf-8'},
-    body: JSON.stringify(lead)
-  });
-  // no-cors responses are opaque (can't read status), so we treat a completed
-  // request as success. Errors here mean the network call itself failed.
-  return { ok:true };
-}
-
-/* =====================================================================
-   IFRAME HEIGHT REPORTING
-   ===================================================================== */
-let hT=null;
-function postHeight(){
-  clearTimeout(hT);
-  hT=setTimeout(()=>{
-    try{ parent.postMessage({moxieCalcHeight:document.documentElement.scrollHeight},'*'); }catch(e){}
-  },100);
-}
-if('ResizeObserver' in window){
-  new ResizeObserver(()=>postHeight()).observe(document.documentElement);
-}
-window.addEventListener('load',()=>{ updateRail(); updatePMIvisibility(); toggleSidebar(); postHeight(); });
-window.addEventListener('resize',()=>{ if(window.innerWidth<=900 && $('results').classList.contains('hidden'))$('mbar').style.display='block'; postHeight(); });
-
-// init
-updateRail();
-updatePMIvisibility();
-toggleSidebar();
-postHeight();
-</script>
-</body>
-</html>
