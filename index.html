@@ -2407,6 +2407,8 @@ postHeight();
 <!--mx-i18n-->
 <style>.mx-es-wait{visibility:hidden}</style>
 <script>
+// the calculator follows only the page it sits in: ?lang=es from the page, or a message when the toggle changes
+try { if (!/[?&]lang=es(&|$)/.test(location.search)) localStorage.removeItem('mx_lang'); } catch (e) {}
 (function () {
   var MX = window.MX || (window.MX = {});
   if (MX.i18n && MX.i18n.v >= 3) return;   // an older embed's engine is replaced by this newer one
@@ -2581,7 +2583,7 @@ postHeight();
 })();
 (function () {
   // Spanish: opens in ?lang=es, follows the parent page's EN/ES toggle, translates text in place so the calculator keeps working
-  function start() { MX.i18n.load(document.body, 'https://cdn.jsdelivr.net/gh/rlucido15/moxie-email-assets@61f4488/website/es/app-rentbuy.json'); }
+  function start() { MX.i18n.load(document.body, 'https://cdn.jsdelivr.net/gh/rlucido15/moxie-email-assets@2263eff/website/es/app-rentbuy.json'); }
   if (document.body) start(); else document.addEventListener('DOMContentLoaded', start);
   window.addEventListener('message', function (e) {
     if (!/^https:\/\/(www\.)?moxiemortgage\.com$/.test(e.origin)) return;
